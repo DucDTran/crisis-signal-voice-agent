@@ -72,7 +72,11 @@ export function useAssemblyAIStream() {
       const socketUrl = new URL('wss://streaming.assemblyai.com/v3/ws');
       socketUrl.searchParams.set('token', tokenBody.token);
       socketUrl.searchParams.set('sample_rate', '16000');
-      socketUrl.searchParams.set('speech_model', 'whisper-rt');
+      socketUrl.searchParams.set('speech_model', 'u3-rt-pro');
+      socketUrl.searchParams.set(
+        'prompt',
+        'Transcribe English emergency operations audio. Preserve place names including Vinh City, Ben Thuy Bridge 1, Vinh University, and Road Team 3.',
+      );
       const socket = new WebSocket(socketUrl);
       let socketReady = false;
 
