@@ -25,6 +25,7 @@ type VinhMapProps = {
   metricValue: string | null;
   selectedLocation: KnownLocationId;
   incidentLocation: LocationId;
+  activeIncidentLocations: LocationId[];
   evidenceMode: 'simulation' | 'live';
 };
 
@@ -122,6 +123,7 @@ export function VinhMap({
   metricValue,
   selectedLocation,
   incidentLocation,
+  activeIncidentLocations,
   evidenceMode,
 }: VinhMapProps) {
   const containerRef = useRef<HTMLDivElement>(null);
@@ -136,6 +138,7 @@ export function VinhMap({
   const metricLabelRef = useRef(metricLabel);
   const metricValueRef = useRef(metricValue);
   const evidenceModeRef = useRef(evidenceMode);
+  const activeIncidentLocationsRef = useRef(activeIncidentLocations);
 
   useEffect(() => {
     selectedRef.current = selectedLocation;
@@ -145,6 +148,7 @@ export function VinhMap({
     metricLabelRef.current = metricLabel;
     metricValueRef.current = metricValue;
     evidenceModeRef.current = evidenceMode;
+    activeIncidentLocationsRef.current = activeIncidentLocations;
   }, [
     evidenceMode,
     hazardType,
@@ -153,6 +157,7 @@ export function VinhMap({
     metricValue,
     selectedLocation,
     status,
+    activeIncidentLocations,
   ]);
 
   useEffect(() => {
@@ -249,7 +254,7 @@ export function VinhMap({
           'is-selected',
           location.id === selectedRef.current,
         );
-        if (location.id === incidentLocationRef.current) {
+        if (activeIncidentLocationsRef.current.includes(location.id)) {
           markerElement.dataset.status = statusRef.current;
         }
         markerElement.setAttribute('aria-hidden', 'true');
@@ -308,7 +313,7 @@ export function VinhMap({
     for (const [id, marker] of markerRefs.current) {
       const element = marker.getElement();
       element.classList.toggle('is-selected', id === selectedLocation);
-      if (id === incidentLocation) element.dataset.status = status;
+      if (activeIncidentLocations.includes(id)) element.dataset.status = status;
       else delete element.dataset.status;
     }
 
@@ -372,6 +377,7 @@ export function VinhMap({
     }
   }, [
     evidenceMode,
+    activeIncidentLocations,
     hazardType,
     incidentLocation,
     metricLabel,

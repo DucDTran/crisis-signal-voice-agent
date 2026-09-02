@@ -8,15 +8,15 @@ All incidents, measurements, casualties, timestamps, and responses in the script
 
 ### Deterministic scenarios
 
-Choose **Flood**, **Storm**, or **Landslide**, then select **Run scenario**. Each exercise streams a public report followed by a field-team report while the transcript, incident memory, map, command briefing, and recommended actions update automatically.
+Choose **Flood**, **Storm**, or **Landslide**, then select **Run scenario**. Each exercise presents a queue of incoming calls with reporter, operator, and field turns. The selected conversation, shared incident memory, map, operational trace, command briefing, and guarded dispatch proposals update as sources arrive.
 
 - **Flood:** 35 cm of moving water at Ben Thuy Bridge 1; route closure, disaster-command notification, canoe standby, and public warning.
 - **Tropical storm:** damaged roofing and an electrical hazard at Vinh Market; utility isolation, controlled evacuation, and technical assessment.
 - **Landslide:** a 60 m unstable slide on the Nui Quyet access road; route closure, technical assessment, and targeted evacuation.
 
-The scripted reports use browser speech synthesis, so these scenarios remain reliable if microphone permission, venue Wi-Fi, or an external API is unavailable.
+The Vinh flood scenario includes five generated English audio fixtures. Those fixtures are streamed through AssemblyAI Universal-3 Pro so the demo exercises the same audio → STT → LLM Gateway path as live intake. Storm and landslide currently use the browser speech-synthesis fallback and are labeled as offline synthetic replay.
 
-### Live incident intake
+### Live incident line
 
 Select **Start live incident** and speak an English emergency report. The live path is:
 
@@ -24,7 +24,7 @@ Select **Start live incident** and speak an English emergency report. The live p
 2. AssemblyAI Universal-3 Pro Streaming returns partial and finalized transcript turns.
 3. Each cumulative finalized transcript is sent server-side to AssemblyAI LLM Gateway.
 4. The analyzer returns a constrained incident record: hazard, location, summary, severity, confidence, measurement, access, trend, people at risk, injuries, and recommended action IDs.
-5. The dashboard updates the incident memory, map, briefing, and guarded action queue.
+5. The dashboard updates the incident memory, map, selected-call transcript, operator follow-up prompt, operational trace, briefing, and guarded action queue.
 
 The analyzer supports flood, tropical storm, landslide, earthquake, wildfire, building collapse, other hazards, and unknown reports. Missing evidence stays **Unknown**. A malformed or incomplete analyzer response is rejected before it can update the interface.
 

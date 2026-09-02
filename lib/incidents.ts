@@ -55,6 +55,21 @@ export type ScenarioReport = {
   text: string;
 };
 
+export type ConversationTurn = {
+  speaker: 'reporter' | 'operator' | 'field';
+  text: string;
+};
+
+export type ScenarioCall = {
+  id: string;
+  title: string;
+  source: string;
+  locationId: LocationId;
+  priority: 'routine' | 'elevated' | 'urgent';
+  audioUrl?: string;
+  turns: ConversationTurn[];
+};
+
 export type Scenario = {
   id: ScenarioId;
   name: string;
@@ -64,6 +79,7 @@ export type Scenario = {
   publicReport: ScenarioReport;
   fieldReport: ScenarioReport;
   operatorPrompt: string;
+  calls: ScenarioCall[];
   briefing: string;
 };
 
@@ -152,6 +168,73 @@ export const scenarios: Record<ScenarioId, Scenario> = {
     },
     operatorPrompt:
       'Operator: I have your location at Ben Thuy Bridge 1. Can you confirm whether anyone is trapped or needs immediate rescue, and whether the water is still rising?',
+    calls: [
+      {
+        id: 'flood-call-01',
+        title: 'Resident · Ben Thuy Bridge 1',
+        source: 'MOBILE · 00:18',
+        locationId: 'bridge',
+        priority: 'urgent',
+        audioUrl: '/audio/vinh/flood-call-01.wav',
+        turns: [
+          { speaker: 'reporter', text: 'I am near Ben Thuy Bridge 1 on the Vinh side. Water is crossing the northern approach.' },
+          { speaker: 'operator', text: 'I have your location. Are you with anyone, and is the water still rising?' },
+          { speaker: 'reporter', text: 'Two people are near a stalled motorbike. It is rising, but I cannot estimate the depth.' },
+        ],
+      },
+      {
+        id: 'flood-call-02',
+        title: 'Road Team 3 · northern approach',
+        source: 'FIELD RADIO · 00:21',
+        locationId: 'bridge',
+        priority: 'urgent',
+        audioUrl: '/audio/vinh/flood-call-02.wav',
+        turns: [
+          { speaker: 'field', text: 'Road Team 3 reporting to coordination. We are at the northern approach.' },
+          { speaker: 'operator', text: 'Confirm depth, access, and whether the barriers are holding.' },
+          { speaker: 'field', text: 'Approximately 35 centimetres of moving water. The route is impassable and barriers are in place.' },
+        ],
+      },
+      {
+        id: 'flood-call-03',
+        title: 'Market manager · eastern entrance',
+        source: 'MOBILE · 00:24',
+        locationId: 'market',
+        priority: 'elevated',
+        audioUrl: '/audio/vinh/flood-call-03.wav',
+        turns: [
+          { speaker: 'reporter', text: 'Water is entering the eastern entrance of Vinh Market. Traders are sheltering inside.' },
+          { speaker: 'operator', text: 'How many people are inside, and do you see any electrical danger?' },
+          { speaker: 'reporter', text: 'Six people. A power cabinet is exposed near the entrance.' },
+        ],
+      },
+      {
+        id: 'flood-call-04',
+        title: 'University shelter coordinator',
+        source: 'LANDLINE · 00:27',
+        locationId: 'university',
+        priority: 'elevated',
+        audioUrl: '/audio/vinh/flood-call-04.wav',
+        turns: [
+          { speaker: 'reporter', text: 'Vinh University can open the sports hall as a temporary shelter.' },
+          { speaker: 'operator', text: 'How many people can you receive and when can the hall open?' },
+          { speaker: 'reporter', text: 'We can receive 120 people immediately.' },
+        ],
+      },
+      {
+        id: 'flood-call-05',
+        title: 'Utility team · power isolation',
+        source: 'FIELD RADIO · 00:31',
+        locationId: 'market',
+        priority: 'urgent',
+        audioUrl: '/audio/vinh/flood-call-05.wav',
+        turns: [
+          { speaker: 'field', text: 'Utility team confirms the exposed market circuit is isolated.' },
+          { speaker: 'operator', text: 'Confirm the perimeter remains closed while the water is moving.' },
+          { speaker: 'field', text: 'Confirmed. No live voltage detected at the eastern entrance.' },
+        ],
+      },
+    ],
     incident: {
       hazardType: 'flood',
       locationId: 'bridge',
@@ -195,6 +278,40 @@ export const scenarios: Record<ScenarioId, Scenario> = {
     },
     operatorPrompt:
       'Operator: I have the market entrance marked. Please move away from the hanging line and confirm how many people are sheltering inside while the field team approaches.',
+    calls: [
+      {
+        id: 'storm-call-01', title: 'Market manager · eastern hall', source: 'MOBILE · 00:20', locationId: 'market', priority: 'urgent',
+        turns: [
+          { speaker: 'reporter', text: 'Strong wind has torn roofing from the eastern hall and debris is falling into the street.' },
+          { speaker: 'operator', text: 'Move away from the entrance. How many people are sheltering inside?' },
+          { speaker: 'reporter', text: 'Six traders are inside, and a power line is hanging near the entrance.' },
+        ],
+      },
+      {
+        id: 'storm-call-02', title: 'Civil defence · market perimeter', source: 'FIELD RADIO · 00:24', locationId: 'market', priority: 'urgent',
+        turns: [
+          { speaker: 'field', text: 'Civil defence unit at Vinh Market. The eastern entrance is unsafe and restricted.' },
+          { speaker: 'operator', text: 'Confirm injuries and whether the utility hazard is isolated.' },
+          { speaker: 'field', text: 'No injuries reported. Utility hazard is isolated; controlled evacuation is required.' },
+        ],
+      },
+      {
+        id: 'storm-call-03', title: 'Railway station · roof damage', source: 'MOBILE · 00:29', locationId: 'station', priority: 'elevated',
+        turns: [
+          { speaker: 'reporter', text: 'The station forecourt has loose roofing and fallen branches. Trains are being held.' },
+          { speaker: 'operator', text: 'Keep passengers inside the concourse and report any injuries.' },
+          { speaker: 'reporter', text: 'No injuries. The forecourt remains closed.' },
+        ],
+      },
+      {
+        id: 'storm-call-04', title: 'University shelter coordinator', source: 'LANDLINE · 00:33', locationId: 'university', priority: 'routine',
+        turns: [
+          { speaker: 'reporter', text: 'The university sports hall is available for people displaced by the storm.' },
+          { speaker: 'operator', text: 'Confirm capacity and access from the market.' },
+          { speaker: 'reporter', text: 'Capacity is 120 people and the western gate is clear.' },
+        ],
+      },
+    ],
     incident: {
       hazardType: 'tropical_storm',
       locationId: 'market',
@@ -238,6 +355,40 @@ export const scenarios: Record<ScenarioId, Scenario> = {
     },
     operatorPrompt:
       'Operator: I have the Nui Quyet access road. Is the minibus stable, and can everyone remain inside while we establish a safe approach below the unstable slope?',
+    calls: [
+      {
+        id: 'landslide-call-01', title: 'Driver · Nui Quyet access road', source: 'MOBILE · 00:17', locationId: 'mountain', priority: 'urgent',
+        turns: [
+          { speaker: 'reporter', text: 'Soil and rocks have come down across the road below Nui Quyet. A minibus is stopped above the slide.' },
+          { speaker: 'operator', text: 'Can everyone remain inside, and is anyone injured?' },
+          { speaker: 'reporter', text: 'Everyone is inside. The slope is still shedding small stones.' },
+        ],
+      },
+      {
+        id: 'landslide-call-02', title: 'Survey Team 2 · slope assessment', source: 'FIELD RADIO · 00:23', locationId: 'mountain', priority: 'urgent',
+        turns: [
+          { speaker: 'field', text: 'Survey Team 2 at Nui Quyet access road. The slide is approximately sixty metres across.' },
+          { speaker: 'operator', text: 'Confirm access and the status of the isolated passengers.' },
+          { speaker: 'field', text: 'Route is completely blocked. Eight people are isolated with no injuries.' },
+        ],
+      },
+      {
+        id: 'landslide-call-03', title: 'Ward team · alternate route', source: 'RADIO · 00:26', locationId: 'university', priority: 'elevated',
+        turns: [
+          { speaker: 'field', text: 'Ward team has identified an alternate approach from the university side.' },
+          { speaker: 'operator', text: 'Hold the approach until the geotechnical team confirms it is safe.' },
+          { speaker: 'field', text: 'Understood. Route remains held and marked.' },
+        ],
+      },
+      {
+        id: 'landslide-call-04', title: 'Geotechnical unit · stability check', source: 'FIELD RADIO · 00:31', locationId: 'mountain', priority: 'urgent',
+        turns: [
+          { speaker: 'field', text: 'Geotechnical unit reports ongoing movement on the upper slope.' },
+          { speaker: 'operator', text: 'Confirm whether responders can approach the minibus.' },
+          { speaker: 'field', text: 'No. Keep the perimeter closed until the slope stabilizes.' },
+        ],
+      },
+    ],
     incident: {
       hazardType: 'landslide',
       locationId: 'mountain',
