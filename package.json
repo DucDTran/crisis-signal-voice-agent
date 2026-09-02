@@ -9,7 +9,8 @@
     "dev": "vinext dev",
     "build": "vinext build",
     "start": "wrangler dev --config dist/server/wrangler.json",
-    "lint": "oxlint app components/flood-dashboard.tsx components/vinh-map.tsx hooks/use-assemblyai-stream.ts public/pcm-processor.js",
+    "start:local": "wrangler dev --config dist/server/wrangler.json --env-file=${INIT_CWD}/.env",
+    "lint": "oxlint app components/flood-dashboard.tsx components/response-actions.tsx components/vinh-map.tsx hooks/use-assemblyai-stream.ts lib/incidents.ts lib/server-env.ts public/pcm-processor.js",
     "format": "oxfmt"
   },
   "dependencies": {

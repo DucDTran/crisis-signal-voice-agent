@@ -20,6 +20,7 @@ export function useAssemblyAIStream() {
   const [state, setState] = useState<StreamState>('idle');
   const [partialTranscript, setPartialTranscript] = useState('');
   const [finalTranscript, setFinalTranscript] = useState('');
+  const [finalTurns, setFinalTurns] = useState<string[]>([]);
   const [error, setError] = useState('');
   const cleanupRef = useRef<(() => void) | null>(null);
 
@@ -35,6 +36,7 @@ export function useAssemblyAIStream() {
     setState('idle');
     setPartialTranscript('');
     setFinalTranscript('');
+    setFinalTurns([]);
     setError('');
   }, []);
 
@@ -43,6 +45,7 @@ export function useAssemblyAIStream() {
     setError('');
     setPartialTranscript('');
     setFinalTranscript('');
+    setFinalTurns([]);
     setState('connecting');
 
     try {
@@ -75,7 +78,20 @@ export function useAssemblyAIStream() {
       socketUrl.searchParams.set('speech_model', 'u3-rt-pro');
       socketUrl.searchParams.set(
         'prompt',
-        'Transcribe English emergency operations audio. Preserve place names including Vinh City, Ben Thuy Bridge 1, Vinh University, and Road Team 3.',
+        'Transcribe English emergency operations audio accurately. Preserve measurements, times, negation, uncertainty, and whether information is reported or confirmed.',
+      );
+      socketUrl.searchParams.set(
+        'keyterms_prompt',
+        JSON.stringify([
+          'Vinh City',
+          'Ben Thuy Bridge 1',
+          'Vinh Railway Station',
+          'Vinh Market',
+          'Vinh University',
+          'Nui Quyet',
+          'Road Team 3',
+          'disaster prevention command',
+        ]),
       );
       const socket = new WebSocket(socketUrl);
       let socketReady = false;
@@ -96,6 +112,7 @@ export function useAssemblyAIStream() {
         if (message.type !== 'Turn' || !message.transcript) return;
         setPartialTranscript(message.transcript);
         if (message.end_of_turn) {
+          setFinalTurns((current) => [...current, message.transcript ?? '']);
           setFinalTranscript((current) =>
             current
               ? `${current} ${message.transcript}`
@@ -137,6 +154,7 @@ export function useAssemblyAIStream() {
     state,
     partialTranscript,
     finalTranscript,
+    finalTurns,
     error,
     start,
     stop,

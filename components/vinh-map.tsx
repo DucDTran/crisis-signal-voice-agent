@@ -1,16 +1,31 @@
 'use client';
 
-import type { Map as MapLibreMap, Marker as MapLibreMarker } from 'maplibre-gl';
+import type {
+  GeoJSONSource,
+  Map as MapLibreMap,
+  Marker as MapLibreMarker,
+} from 'maplibre-gl';
 import { useEffect, useRef } from 'react';
 
-export type LocationId = 'bridge' | 'station' | 'market' | 'university';
+import {
+  hazardLabels,
+  type HazardType,
+  type LocationId,
+} from '@/lib/incidents';
 
+export type { LocationId } from '@/lib/incidents';
+
+type KnownLocationId = Exclude<LocationId, 'unknown'>;
 type MapStatus = 'idle' | 'reported' | 'verified';
 
 type VinhMapProps = {
   status: MapStatus;
-  waterLevelLabel: string | null;
-  selectedLocation: LocationId;
+  hazardType: HazardType;
+  metricLabel: string;
+  metricValue: string | null;
+  selectedLocation: KnownLocationId;
+  incidentLocation: LocationId;
+  evidenceMode: 'simulation' | 'live';
 };
 
 const locations = [
@@ -34,45 +49,111 @@ const locations = [
     coordinates: [105.6952531, 18.6609333] as [number, number],
     kind: 'landmark',
   },
+  {
+    id: 'mountain' as const,
+    coordinates: [105.6993583, 18.6467128] as [number, number],
+    kind: 'landmark',
+  },
 ];
 
-const simulatedFloodExtent = {
-  type: 'Feature' as const,
-  properties: {},
-  geometry: {
-    type: 'Polygon' as const,
-    coordinates: [
-      [
-        [105.7047, 18.6515],
-        [105.7074, 18.6518],
-        [105.7103, 18.6488],
-        [105.7101, 18.6458],
-        [105.7072, 18.6448],
-        [105.7048, 18.6474],
-        [105.7047, 18.6515],
-      ],
-    ],
-  },
+const hazardColors: Record<HazardType, string> = {
+  flood: '#3b91aa',
+  tropical_storm: '#8062a9',
+  landslide: '#bd773d',
+  earthquake: '#c45f4c',
+  wildfire: '#d1703f',
+  building_collapse: '#b36f55',
+  other: '#718e91',
+  unknown: '#718e91',
 };
+
+function findLocation(id: LocationId) {
+  return locations.find((location) => location.id === id);
+}
+
+function circleExtent(center: [number, number], radius = 0.0024) {
+  const coordinates = Array.from({ length: 25 }, (_, index) => {
+    const angle = (Math.PI * 2 * index) / 24;
+    return [
+      center[0] + Math.cos(angle) * radius,
+      center[1] + Math.sin(angle) * radius * 0.82,
+    ];
+  });
+  return {
+    type: 'Feature' as const,
+    properties: {},
+    geometry: { type: 'Polygon' as const, coordinates: [coordinates] },
+  };
+}
+
+function incidentExtent(hazardType: HazardType, locationId: LocationId) {
+  if (hazardType === 'flood' && locationId === 'bridge') {
+    return {
+      type: 'Feature' as const,
+      properties: {},
+      geometry: {
+        type: 'Polygon' as const,
+        coordinates: [
+          [
+            [105.7047, 18.6515],
+            [105.7074, 18.6518],
+            [105.7103, 18.6488],
+            [105.7101, 18.6458],
+            [105.7072, 18.6448],
+            [105.7048, 18.6474],
+            [105.7047, 18.6515],
+          ],
+        ],
+      },
+    };
+  }
+
+  const location = findLocation(locationId) ?? locations[0];
+  return circleExtent(
+    location.coordinates,
+    hazardType === 'tropical_storm' ? 0.0032 : 0.0022,
+  );
+}
 
 export function VinhMap({
   status,
-  waterLevelLabel,
+  hazardType,
+  metricLabel,
+  metricValue,
   selectedLocation,
+  incidentLocation,
+  evidenceMode,
 }: VinhMapProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const mapRef = useRef<MapLibreMap | null>(null);
-  const markerRefs = useRef<Map<LocationId, MapLibreMarker>>(new Map());
-  const waterLabelRef = useRef<HTMLDivElement | null>(null);
+  const markerRefs = useRef<Map<KnownLocationId, MapLibreMarker>>(new Map());
+  const incidentLabelRef = useRef<HTMLDivElement | null>(null);
+  const incidentLabelMarkerRef = useRef<MapLibreMarker | null>(null);
   const selectedRef = useRef(selectedLocation);
   const statusRef = useRef(status);
-  const levelRef = useRef(waterLevelLabel);
+  const hazardRef = useRef(hazardType);
+  const incidentLocationRef = useRef(incidentLocation);
+  const metricLabelRef = useRef(metricLabel);
+  const metricValueRef = useRef(metricValue);
+  const evidenceModeRef = useRef(evidenceMode);
 
   useEffect(() => {
     selectedRef.current = selectedLocation;
     statusRef.current = status;
-    levelRef.current = waterLevelLabel;
-  }, [selectedLocation, status, waterLevelLabel]);
+    hazardRef.current = hazardType;
+    incidentLocationRef.current = incidentLocation;
+    metricLabelRef.current = metricLabel;
+    metricValueRef.current = metricValue;
+    evidenceModeRef.current = evidenceMode;
+  }, [
+    evidenceMode,
+    hazardType,
+    incidentLocation,
+    metricLabel,
+    metricValue,
+    selectedLocation,
+    status,
+  ]);
 
   useEffect(() => {
     const container = containerRef.current;
@@ -128,33 +209,33 @@ export function VinhMap({
       );
 
       map.on('load', () => {
-        map.addSource('simulated-flood-extent', {
+        map.addSource('incident-extent', {
           type: 'geojson',
-          data: simulatedFloodExtent,
+          data: incidentExtent(hazardRef.current, incidentLocationRef.current),
         });
         map.addLayer({
-          id: 'simulated-flood-fill',
+          id: 'incident-extent-fill',
           type: 'fill',
-          source: 'simulated-flood-extent',
+          source: 'incident-extent',
           layout: {
             visibility: statusRef.current === 'idle' ? 'none' : 'visible',
           },
           paint: {
-            'fill-color': '#3b91aa',
-            'fill-opacity': statusRef.current === 'verified' ? 0.48 : 0.26,
+            'fill-color': hazardColors[hazardRef.current],
+            'fill-opacity': statusRef.current === 'verified' ? 0.46 : 0.25,
           },
         });
         map.addLayer({
-          id: 'simulated-flood-outline',
+          id: 'incident-extent-outline',
           type: 'line',
-          source: 'simulated-flood-extent',
+          source: 'incident-extent',
           layout: {
             visibility: statusRef.current === 'idle' ? 'none' : 'visible',
           },
           paint: {
-            'line-color': '#7fc1d2',
-            'line-width': 2,
-            'line-opacity': 0.86,
+            'line-color': hazardColors[hazardRef.current],
+            'line-width': 2.5,
+            'line-opacity': 0.9,
             'line-dasharray': [2, 1.5],
           },
         });
@@ -168,11 +249,13 @@ export function VinhMap({
           'is-selected',
           location.id === selectedRef.current,
         );
-        if (location.id === 'bridge') {
+        if (location.id === incidentLocationRef.current) {
           markerElement.dataset.status = statusRef.current;
         }
         markerElement.setAttribute('aria-hidden', 'true');
-        markerElement.innerHTML = '<span class="map-marker-core"></span>';
+        const core = document.createElement('span');
+        core.className = 'map-marker-core';
+        markerElement.appendChild(core);
 
         const mapMarker = new maplibregl.Marker({ element: markerElement })
           .setLngLat(location.coordinates)
@@ -180,14 +263,29 @@ export function VinhMap({
         markers.set(location.id, mapMarker);
       }
 
-      const waterLabel = document.createElement('div');
-      waterLabel.className = 'water-level-label';
-      waterLabel.setAttribute('aria-hidden', 'true');
-      waterLabel.innerHTML = `<span>Water level</span><strong>${levelRef.current ?? 'Depth unknown'}</strong><small>Simulated</small>`;
-      waterLabel.hidden = statusRef.current === 'idle';
-      waterLabelRef.current = waterLabel;
-      new maplibregl.Marker({ element: waterLabel, anchor: 'bottom-left' })
-        .setLngLat([105.7065, 18.6495])
+      const incidentLabel = document.createElement('div');
+      incidentLabel.className = 'water-level-label';
+      incidentLabel.setAttribute('aria-hidden', 'true');
+      const label = document.createElement('span');
+      label.textContent = metricLabelRef.current;
+      const value = document.createElement('strong');
+      value.textContent = metricValueRef.current ?? 'Awaiting measurement';
+      const source = document.createElement('small');
+      source.textContent =
+        evidenceModeRef.current === 'live' ? 'AI extracted' : 'Simulated';
+      incidentLabel.appendChild(label);
+      incidentLabel.appendChild(value);
+      incidentLabel.appendChild(source);
+      incidentLabel.hidden = statusRef.current === 'idle';
+      incidentLabelRef.current = incidentLabel;
+
+      const labelLocation =
+        findLocation(incidentLocationRef.current) ?? locations[0];
+      incidentLabelMarkerRef.current = new maplibregl.Marker({
+        element: incidentLabel,
+        anchor: 'bottom-left',
+      })
+        .setLngLat(labelLocation.coordinates)
         .addTo(map);
 
       resizeObserver = new ResizeObserver(() => map.resize());
@@ -199,7 +297,8 @@ export function VinhMap({
       cancelled = true;
       resizeObserver?.disconnect();
       markers.clear();
-      waterLabelRef.current = null;
+      incidentLabelRef.current = null;
+      incidentLabelMarkerRef.current = null;
       mapRef.current?.remove();
       mapRef.current = null;
     };
@@ -209,42 +308,77 @@ export function VinhMap({
     for (const [id, marker] of markerRefs.current) {
       const element = marker.getElement();
       element.classList.toggle('is-selected', id === selectedLocation);
-      if (id === 'bridge') element.dataset.status = status;
+      if (id === incidentLocation) element.dataset.status = status;
+      else delete element.dataset.status;
     }
 
-    const label = waterLabelRef.current;
+    const label = incidentLabelRef.current;
     if (label) {
       label.hidden = status === 'idle';
+      const name = label.querySelector('span');
       const value = label.querySelector('strong');
-      if (value) value.textContent = waterLevelLabel ?? 'Depth unknown';
+      const source = label.querySelector('small');
+      if (name) name.textContent = metricLabel;
+      if (value) value.textContent = metricValue ?? 'Awaiting measurement';
+      if (source) {
+        source.textContent =
+          evidenceMode === 'live' ? 'AI extracted' : 'Simulated';
+      }
       label.dataset.status = status;
     }
 
+    const incidentTarget = findLocation(incidentLocation);
+    if (incidentTarget) {
+      incidentLabelMarkerRef.current?.setLngLat(incidentTarget.coordinates);
+    }
+
     const map = mapRef.current;
-    if (map?.getLayer('simulated-flood-fill')) {
+    const source = map?.getSource('incident-extent') as
+      | GeoJSONSource
+      | undefined;
+    void source?.setData(incidentExtent(hazardType, incidentLocation));
+    if (map?.getLayer('incident-extent-fill')) {
       const visibility = status === 'idle' ? 'none' : 'visible';
-      map.setLayoutProperty('simulated-flood-fill', 'visibility', visibility);
+      map.setLayoutProperty('incident-extent-fill', 'visibility', visibility);
       map.setLayoutProperty(
-        'simulated-flood-outline',
+        'incident-extent-outline',
         'visibility',
         visibility,
       );
       map.setPaintProperty(
-        'simulated-flood-fill',
+        'incident-extent-fill',
+        'fill-color',
+        hazardColors[hazardType],
+      );
+      map.setPaintProperty(
+        'incident-extent-outline',
+        'line-color',
+        hazardColors[hazardType],
+      );
+      map.setPaintProperty(
+        'incident-extent-fill',
         'fill-opacity',
-        status === 'verified' ? 0.48 : 0.26,
+        status === 'verified' ? 0.46 : 0.25,
       );
     }
 
-    const target = locations.find((item) => item.id === selectedLocation);
-    if (target && map) {
+    const selectedTarget = findLocation(selectedLocation);
+    if (selectedTarget && map) {
       map.easeTo({
-        center: target.coordinates,
-        zoom: selectedLocation === 'bridge' ? 14.3 : 13.5,
+        center: selectedTarget.coordinates,
+        zoom: selectedLocation === 'bridge' ? 14.3 : 14,
         duration: 600,
       });
     }
-  }, [selectedLocation, status, waterLevelLabel]);
+  }, [
+    evidenceMode,
+    hazardType,
+    incidentLocation,
+    metricLabel,
+    metricValue,
+    selectedLocation,
+    status,
+  ]);
 
   return (
     <div className="relative h-[430px] overflow-hidden bg-[#10171a]">
@@ -256,12 +390,14 @@ export function VinhMap({
       <div className="map-vignette pointer-events-none absolute inset-0" />
       <div className="pointer-events-none absolute left-4 top-4 rounded-md border border-white/10 bg-[#11181b]/92 px-3 py-2 shadow-xl">
         <p className="font-mono text-[10px] font-semibold uppercase tracking-[0.14em] text-[#d79b39]">
-          Flood exercise map
+          Multi-hazard exercise map
         </p>
-        <p className="mt-0.5 text-xs text-[#d9e1df]">Vinh City, Vietnam</p>
+        <p className="mt-0.5 text-xs text-[#d9e1df]">
+          {hazardLabels[hazardType]} · Vinh City, Vietnam
+        </p>
       </div>
       <div className="pointer-events-none absolute bottom-7 left-4 rounded-md border border-[#7fc1d2]/20 bg-[#10191c]/90 px-2.5 py-2 text-[10px] text-[#9fb5b2] shadow-lg">
-        Blue area shows simulated flood extent
+        Colored area is an illustrative impact zone
       </div>
     </div>
   );

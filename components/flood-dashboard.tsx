@@ -2,6 +2,7 @@
 
 import {
   Activity,
+  AlertTriangle,
   AudioLines,
   Bell,
   Check,
@@ -19,48 +20,51 @@ import {
   Route,
   Settings,
   ShieldCheck,
+  Sparkles,
   Users,
   Volume2,
   Waves,
 } from 'lucide-react';
 import { useEffect, useMemo, useState } from 'react';
 
+import { ResponseActions } from '@/components/response-actions';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from '@/components/ui/select';
 import {
   Tooltip,
   TooltipContent,
   TooltipProvider,
   TooltipTrigger,
 } from '@/components/ui/tooltip';
-import { type LocationId, VinhMap } from '@/components/vinh-map';
+import { VinhMap } from '@/components/vinh-map';
 import { useAssemblyAIStream } from '@/hooks/use-assemblyai-stream';
+import {
+  actionCatalog,
+  hazardLabels,
+  isIncidentSnapshot,
+  scenarios,
+  type ActionId,
+  type IncidentSnapshot,
+  type LocationId,
+  type Scenario,
+  type ScenarioId,
+  type ScenarioReport,
+} from '@/lib/incidents';
 
 type StreamStage = 'ready' | 'public' | 'field' | 'complete';
 type ReportId = 'public' | 'field';
+type KnownLocationId = Exclude<LocationId, 'unknown'>;
+type AnalysisState = 'idle' | 'analyzing' | 'ready' | 'error';
+type ActionStatuses = Partial<Record<ActionId, 'dispatched'>>;
 
-type Report = {
-  id: ReportId;
-  title: string;
-  source: string;
-  text: string;
-};
-
-const publicReport: Report = {
-  id: 'public',
-  title: 'Public call 01',
-  source: 'MOBILE · 00:18',
-  text: 'I am near Ben Thuy Bridge 1 on the Vinh side. Water is crossing the northern approach. I passed about five minutes ago. It still appears to be rising, but I cannot estimate the depth.',
-};
-
-const fieldReport: Report = {
-  id: 'field',
-  title: 'Road Team 3 radio',
-  source: 'FIELD RADIO · 00:21',
-  text: 'Road Team 3 reporting to coordination. At 11:18, moving water on the northern approach to Ben Thuy Bridge 1 is approximately 35 centimetres deep. The route is impassable. Barriers are in place. No road surface damage is visible.',
-};
-
-const landmarks: Record<LocationId, { name: string; meta: string }> = {
+const landmarks: Record<KnownLocationId, { name: string; meta: string }> = {
   bridge: {
     name: 'Ben Thuy Bridge 1',
     meta: 'Northern approach, Vinh side',
@@ -71,11 +75,15 @@ const landmarks: Record<LocationId, { name: string; meta: string }> = {
   },
   market: {
     name: 'Vinh Market',
-    meta: 'Community landmark',
+    meta: 'Community and trading district',
   },
   university: {
     name: 'Vinh University',
     meta: 'Relief staging destination',
+  },
+  mountain: {
+    name: 'Nui Quyet',
+    meta: 'Mountain access road',
   },
 };
 
@@ -88,14 +96,24 @@ const navItems = [
 ];
 
 export function FloodDashboard() {
+  const [scenarioId, setScenarioId] = useState<ScenarioId>('flood');
   const [stage, setStage] = useState<StreamStage>('ready');
   const [revealedWords, setRevealedWords] = useState(0);
   const [selectedLocation, setSelectedLocation] =
-    useState<LocationId>('bridge');
+    useState<KnownLocationId>('bridge');
   const [playingReport, setPlayingReport] = useState<ReportId | null>(null);
   const [briefingVisible, setBriefingVisible] = useState(false);
+  const [liveIncident, setLiveIncident] = useState<IncidentSnapshot | null>(
+    null,
+  );
+  const [analysisState, setAnalysisState] = useState<AnalysisState>('idle');
+  const [analysisError, setAnalysisError] = useState('');
+  const [actionStatuses, setActionStatuses] = useState<ActionStatuses>({});
   const stream = useAssemblyAIStream();
 
+  const scenario = scenarios[scenarioId];
+  const publicReport = scenario.publicReport;
+  const fieldReport = scenario.fieldReport;
   const activeReport =
     stage === 'public' ? publicReport : stage === 'field' ? fieldReport : null;
   const activeWords = useMemo(
@@ -108,33 +126,49 @@ export function FloodDashboard() {
       ? 1
       : 0;
 
-  const publicSeen = stage !== 'ready';
   const publicComplete = stage === 'field' || stage === 'complete';
   const fieldSeen = stage === 'field' || stage === 'complete';
   const fieldComplete = stage === 'complete';
   const fieldProgress = stage === 'field' ? progress : fieldComplete ? 1 : 0;
   const publicProgress = stage === 'public' ? progress : publicComplete ? 1 : 0;
 
-  const locationKnown = publicProgress >= 0.28 || fieldSeen;
-  const floodObserved = publicProgress >= 0.48 || fieldSeen;
-  const trendKnown = publicProgress >= 0.75 || fieldSeen;
-  const depthKnown = fieldProgress >= 0.48;
-  const closureKnown = fieldProgress >= 0.68;
-  const barriersKnown = fieldProgress >= 0.82;
+  const locationKnown = publicProgress >= 0.26 || fieldSeen;
+  const hazardKnown = publicProgress >= 0.44 || fieldSeen;
+  const trendKnown = publicProgress >= 0.74 || fieldSeen;
+  const metricKnown = fieldProgress >= 0.48;
+  const accessKnown = fieldProgress >= 0.68;
+  const peopleKnown = fieldProgress >= 0.82;
 
-  const mapStatus = depthKnown
-    ? 'verified'
-    : floodObserved
-      ? 'reported'
-      : 'idle';
-  const waterLevelLabel = depthKnown
-    ? '35 cm'
-    : floodObserved
-      ? 'Depth unknown'
-      : null;
-
+  const liveMode =
+    stream.state === 'connecting' ||
+    stream.state === 'listening' ||
+    stream.finalTurns.length > 0 ||
+    Boolean(liveIncident);
+  const displayedIncident = liveIncident ?? scenario.incident;
+  const incidentLocation =
+    liveIncident?.locationId ?? scenario.incident.locationId;
+  const mapStatus = liveIncident
+    ? liveIncident.confidence === 'high'
+      ? 'verified'
+      : 'reported'
+    : metricKnown
+      ? 'verified'
+      : hazardKnown
+        ? 'reported'
+        : 'idle';
+  const metricValue = liveIncident
+    ? liveIncident.metricValue === 'Unknown'
+      ? null
+      : liveIncident.metricValue
+    : metricKnown
+      ? scenario.incident.metricValue
+      : hazardKnown
+        ? 'Awaiting field report'
+        : null;
   const selected = landmarks[selectedLocation];
-  const selectedIsBridge = selectedLocation === 'bridge';
+  const selectedIsIncident = selectedLocation === incidentLocation;
+  const actionsIncident =
+    liveIncident ?? (stage === 'complete' ? scenario.incident : null);
 
   useEffect(() => {
     if (!activeReport) return;
@@ -160,27 +194,73 @@ export function FloodDashboard() {
   }, [activeReport, activeWords.length, revealedWords, stage]);
 
   useEffect(() => {
+    const transcript = stream.finalTurns.join(' ').trim();
+    if (!transcript) return;
+
+    const controller = new AbortController();
+    queueMicrotask(() => {
+      if (!controller.signal.aborted) {
+        setAnalysisState('analyzing');
+        setAnalysisError('');
+      }
+    });
+
+    void fetch('/api/analyze-incident', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ transcript }),
+      signal: controller.signal,
+    })
+      .then(async (response) => {
+        const body = (await response.json()) as {
+          incident?: unknown;
+          error?: string;
+        };
+        if (!response.ok || !isIncidentSnapshot(body.incident)) {
+          throw new Error(body.error ?? 'Live incident analysis failed.');
+        }
+        setLiveIncident(body.incident);
+        setAnalysisState('ready');
+        setBriefingVisible(true);
+        if (body.incident.locationId !== 'unknown') {
+          setSelectedLocation(body.incident.locationId);
+        }
+      })
+      .catch((error: unknown) => {
+        if (error instanceof Error && error.name === 'AbortError') return;
+        setAnalysisError(
+          error instanceof Error ? error.message : 'Live analysis failed.',
+        );
+        setAnalysisState('error');
+      });
+
+    return () => controller.abort();
+  }, [stream.finalTurns]);
+
+  useEffect(() => {
     return () => window.speechSynthesis?.cancel();
   }, []);
 
   function queueExerciseAudio() {
     if (!('speechSynthesis' in window)) return;
     window.speechSynthesis.cancel();
-    const call = new SpeechSynthesisUtterance(publicReport.text);
-    call.lang = 'en-US';
-    call.rate = 0.96;
-    const radio = new SpeechSynthesisUtterance(fieldReport.text);
-    radio.lang = 'en-US';
-    radio.rate = 0.98;
-    window.speechSynthesis.speak(call);
-    window.speechSynthesis.speak(radio);
+    for (const report of [publicReport, fieldReport]) {
+      const utterance = new SpeechSynthesisUtterance(report.text);
+      utterance.lang = 'en-US';
+      utterance.rate = report.id === 'public' ? 0.96 : 0.98;
+      window.speechSynthesis.speak(utterance);
+    }
   }
 
   function startSimulation() {
     stream.reset();
+    setLiveIncident(null);
+    setAnalysisState('idle');
+    setAnalysisError('');
+    setActionStatuses({});
     setStage('public');
     setRevealedWords(0);
-    setSelectedLocation('bridge');
+    setSelectedLocation(scenario.incident.locationId as KnownLocationId);
     setBriefingVisible(false);
     queueExerciseAudio();
   }
@@ -190,12 +270,46 @@ export function FloodDashboard() {
     stream.reset();
     setStage('ready');
     setRevealedWords(0);
-    setSelectedLocation('bridge');
+    setSelectedLocation(scenario.incident.locationId as KnownLocationId);
     setPlayingReport(null);
     setBriefingVisible(false);
+    setLiveIncident(null);
+    setAnalysisState('idle');
+    setAnalysisError('');
+    setActionStatuses({});
   }
 
-  function playReport(report: Report) {
+  function changeScenario(value: ScenarioId | null) {
+    if (!value) return;
+    window.speechSynthesis?.cancel();
+    stream.reset();
+    const nextScenario = scenarios[value];
+    setScenarioId(value);
+    setStage('ready');
+    setRevealedWords(0);
+    setSelectedLocation(nextScenario.incident.locationId as KnownLocationId);
+    setPlayingReport(null);
+    setBriefingVisible(false);
+    setLiveIncident(null);
+    setAnalysisState('idle');
+    setAnalysisError('');
+    setActionStatuses({});
+  }
+
+  async function startLiveIncident() {
+    window.speechSynthesis?.cancel();
+    setStage('ready');
+    setRevealedWords(0);
+    setPlayingReport(null);
+    setBriefingVisible(false);
+    setLiveIncident(null);
+    setAnalysisState('idle');
+    setAnalysisError('');
+    setActionStatuses({});
+    await stream.start();
+  }
+
+  function playReport(report: ScenarioReport) {
     if (!('speechSynthesis' in window)) return;
     if (playingReport === report.id) {
       window.speechSynthesis.cancel();
@@ -216,20 +330,31 @@ export function FloodDashboard() {
     setBriefingVisible(true);
     if (!('speechSynthesis' in window)) return;
     window.speechSynthesis.cancel();
-    const utterance = new SpeechSynthesisUtterance(
-      'Ben Thuy Bridge 1 is currently impassable on the northern approach. Road Team 3 reported approximately 35 centimetres of moving water with barriers in place. Use Vinh University as the staging destination and confirm an alternate route with coordination.',
-    );
+    const actionText = displayedIncident.recommendedActionIds
+      .map((id) => actionCatalog[id].title)
+      .join(', ');
+    const text = liveIncident
+      ? `${liveIncident.summary} Recommended actions for operator review: ${actionText}.`
+      : scenario.briefing;
+    const utterance = new SpeechSynthesisUtterance(text);
     utterance.lang = 'en-US';
     utterance.rate = 0.94;
     window.speechSynthesis.speak(utterance);
   }
 
+  function dispatchAction(actionId: ActionId) {
+    setActionStatuses((current) => ({
+      ...current,
+      [actionId]: 'dispatched',
+    }));
+  }
+
   const actionLabel =
     stage === 'ready'
-      ? 'Run live simulation'
+      ? 'Run scenario'
       : stage === 'complete'
-        ? 'Replay simulation'
-        : 'Streaming live';
+        ? 'Replay scenario'
+        : 'Streaming scenario';
 
   return (
     <TooltipProvider>
@@ -241,23 +366,44 @@ export function FloodDashboard() {
             </div>
             <div className="min-w-0">
               <p className="truncate text-[15px] font-semibold tracking-tight">
-                FloodSignal
+                CrisisSignal
               </p>
               <p className="truncate font-mono text-[10px] uppercase tracking-[0.12em] text-[#7f918d]">
-                Live crisis memory
+                Multi-hazard crisis memory
               </p>
             </div>
           </div>
 
-          <div className="ml-auto flex items-center gap-2">
-            <Badge className="hidden border-[#d79b39]/30 bg-[#d79b39]/10 font-mono text-[10px] uppercase tracking-[0.08em] text-[#e6b35f] sm:inline-flex">
-              Fictional exercise
+          <div className="ml-auto flex flex-wrap items-center justify-end gap-2">
+            <Badge className="hidden border-[#d79b39]/30 bg-[#d79b39]/10 font-mono text-[9px] uppercase tracking-[0.08em] text-[#e6b35f] xl:inline-flex">
+              Demo · no external dispatch
             </Badge>
+            <Select value={scenarioId} onValueChange={changeScenario}>
+              <SelectTrigger
+                size="sm"
+                aria-label="Choose disaster scenario"
+                className="w-[130px] border-white/10 bg-white/[0.025] text-xs text-[#c6d1ce]"
+              >
+                <SelectValue>{scenario.shortName}</SelectValue>
+              </SelectTrigger>
+              <SelectContent className="border-white/10 bg-[#11191b] text-[#d7e0dd]">
+                {(Object.keys(scenarios) as ScenarioId[]).map((id) => (
+                  <SelectItem key={id} value={id}>
+                    {scenarios[id].shortName}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
             <Button
               size="sm"
               onClick={startSimulation}
-              disabled={stage === 'public' || stage === 'field'}
-              className="min-w-[148px] bg-[#d79b39] text-[#1d160b] hover:bg-[#e9ae4c]"
+              disabled={
+                stage === 'public' ||
+                stage === 'field' ||
+                stream.state === 'connecting' ||
+                stream.state === 'listening'
+              }
+              className="min-w-[132px] bg-[#d79b39] text-[#1d160b] hover:bg-[#e9ae4c]"
             >
               {stage === 'public' || stage === 'field' ? (
                 <LoaderCircle
@@ -275,14 +421,14 @@ export function FloodDashboard() {
                   <Button
                     variant="ghost"
                     size="icon"
-                    aria-label="Reset simulation"
+                    aria-label="Reset incident"
                     onClick={resetSimulation}
                   />
                 }
               >
                 <RefreshCw className="size-4" />
               </TooltipTrigger>
-              <TooltipContent>Reset simulation</TooltipContent>
+              <TooltipContent>Reset incident</TooltipContent>
             </Tooltip>
             <Tooltip>
               <TooltipTrigger
@@ -301,8 +447,8 @@ export function FloodDashboard() {
           </div>
         </header>
 
-        <div className="grid min-h-[calc(100dvh-4rem)] grid-cols-1 lg:grid-cols-[208px_minmax(0,1fr)_390px]">
-          <Sidebar />
+        <div className="grid min-h-[calc(100dvh-4rem)] grid-cols-1 lg:grid-cols-[208px_minmax(0,1fr)_410px]">
+          <Sidebar liveMode={liveMode} />
 
           <section className="min-w-0 bg-[#0e1517]">
             <div className="flex min-h-[76px] flex-wrap items-center gap-3 border-b border-white/8 px-4 py-3 lg:px-5">
@@ -310,26 +456,34 @@ export function FloodDashboard() {
                 <div className="flex items-center gap-2">
                   <span
                     className={`size-2 rounded-full ${
-                      stage === 'public' || stage === 'field'
+                      stage === 'public' ||
+                      stage === 'field' ||
+                      stream.state === 'listening'
                         ? 'animate-pulse bg-[#65c9a3] shadow-[0_0_0_4px_rgb(77_187_145/12%)]'
-                        : stage === 'complete'
+                        : liveIncident || stage === 'complete'
                           ? 'bg-[#dd644c] shadow-[0_0_0_4px_rgb(221_100_76/13%)]'
                           : 'bg-[#667773]'
                     }`}
                     aria-hidden="true"
                   />
                   <h1 className="truncate text-sm font-semibold">
-                    Vinh flood response exercise
+                    {liveMode
+                      ? 'Live multi-hazard incident intake'
+                      : scenario.exerciseTitle}
                   </h1>
                 </div>
                 <p className="mt-1 pl-4 text-xs text-[#7f918d]">
-                  Audio becomes shared incident memory while responders speak.
+                  {liveMode
+                    ? 'Finalized speech turns become a structured, source-linked incident record.'
+                    : 'Choose a hazard, stream the reports, then authorize simulated response actions.'}
                 </p>
               </div>
               <div className="ml-auto flex items-center gap-3 font-mono text-[10px] text-[#7c8d89]">
                 <span className="flex items-center gap-1.5">
                   <Clock3 className="size-3.5" aria-hidden="true" />
-                  {stage === 'complete' ? '11:18' : '11:06'} ICT
+                  {liveIncident || stage === 'complete'
+                    ? '11:18'
+                    : '11:06'} ICT
                 </span>
                 <span className="hidden items-center gap-1.5 sm:flex">
                   <ShieldCheck
@@ -344,8 +498,12 @@ export function FloodDashboard() {
             <div className="grid grid-rows-[430px_auto]">
               <VinhMap
                 status={mapStatus}
-                waterLevelLabel={waterLevelLabel}
+                hazardType={displayedIncident.hazardType}
+                metricLabel={displayedIncident.metricLabel}
+                metricValue={metricValue}
                 selectedLocation={selectedLocation}
+                incidentLocation={incidentLocation}
+                evidenceMode={liveIncident ? 'live' : 'simulation'}
               />
 
               <div className="border-t border-white/8 bg-[#0c1214] p-4 lg:p-5">
@@ -362,7 +520,8 @@ export function FloodDashboard() {
                   <div className="flex items-center gap-2">
                     <StatusBadge
                       status={mapStatus}
-                      isBridge={selectedIsBridge}
+                      isIncident={selectedIsIncident}
+                      incident={displayedIncident}
                     />
                     <Button
                       variant="outline"
@@ -377,31 +536,34 @@ export function FloodDashboard() {
 
                 <div className="mt-4 grid gap-px overflow-hidden rounded-md border border-white/8 bg-white/8 sm:grid-cols-3">
                   <Metric
-                    label="Water level"
-                    value={
-                      depthKnown
-                        ? '35 cm'
-                        : floodObserved
-                          ? 'Unknown'
-                          : 'No report'
+                    label={displayedIncident.metricLabel}
+                    value={metricValue ?? 'No confirmed value'}
+                    live={
+                      analysisState === 'analyzing' ||
+                      (stage === 'field' && !metricKnown)
                     }
-                    live={stage === 'field' && !depthKnown}
                   />
                   <Metric
                     label="Access"
-                    value={closureKnown ? 'Impassable' : 'Not established'}
-                    live={stage === 'field' && !closureKnown}
+                    value={
+                      liveIncident
+                        ? titleCase(liveIncident.access)
+                        : accessKnown
+                          ? titleCase(scenario.incident.access)
+                          : 'Not established'
+                    }
+                    live={stage === 'field' && !accessKnown}
                   />
                   <Metric
-                    label="Source"
+                    label="People at risk"
                     value={
-                      depthKnown
-                        ? 'Road Team 3'
-                        : publicSeen
-                          ? 'Public caller'
-                          : 'Waiting'
+                      liveIncident
+                        ? liveIncident.peopleAtRisk
+                        : peopleKnown
+                          ? scenario.incident.peopleAtRisk
+                          : 'Not established'
                     }
-                    live={stage === 'public' || stage === 'field'}
+                    live={stage === 'field' && !peopleKnown}
                   />
                 </div>
 
@@ -414,21 +576,30 @@ export function FloodDashboard() {
           </section>
 
           <LiveOperationsPanel
+            scenario={scenario}
             stage={stage}
             revealedWords={revealedWords}
             playingReport={playingReport}
             onPlayReport={playReport}
             summary={{
               locationKnown,
-              floodObserved,
+              hazardKnown,
               trendKnown,
-              depthKnown,
-              closureKnown,
-              barriersKnown,
+              metricKnown,
+              accessKnown,
+              peopleKnown,
             }}
+            liveIncident={liveIncident}
+            analysisState={analysisState}
+            analysisError={analysisError}
             briefingVisible={briefingVisible}
             onSpeakBriefing={speakBriefing}
             stream={stream}
+            onStartLive={startLiveIncident}
+            onStopLive={stream.stop}
+            actionsIncident={actionsIncident}
+            actionStatuses={actionStatuses}
+            onDispatchAction={dispatchAction}
           />
         </div>
       </main>
@@ -436,7 +607,7 @@ export function FloodDashboard() {
   );
 }
 
-function Sidebar() {
+function Sidebar({ liveMode }: { liveMode: boolean }) {
   return (
     <aside className="hidden border-r border-white/8 bg-[#0c1214] lg:flex lg:flex-col">
       <nav className="space-y-1 p-3" aria-label="Primary navigation">
@@ -462,10 +633,11 @@ function Sidebar() {
         <div className="mb-3 rounded-md border border-white/8 bg-white/[0.025] p-3">
           <div className="flex items-center gap-2 text-xs text-[#aab8b5]">
             <Radio className="size-4 text-[#4dbb91]" aria-hidden="true" />
-            Streaming pipeline ready
+            {liveMode ? 'Live pipeline active' : 'Streaming pipeline ready'}
           </div>
           <p className="mt-2 font-mono text-[10px] leading-relaxed text-[#667773]">
-            Synthetic English audio. No live emergency data.
+            AI recommendations require operator authorization. No external calls
+            are made by this demo.
           </p>
         </div>
         <Button
@@ -473,7 +645,7 @@ function Sidebar() {
           className="w-full justify-start gap-2 px-2 text-xs text-[#82938f]"
         >
           <Settings className="size-4" aria-hidden="true" />
-          Simulation settings
+          Exercise settings
         </Button>
       </div>
     </aside>
@@ -482,36 +654,60 @@ function Sidebar() {
 
 type SummaryState = {
   locationKnown: boolean;
-  floodObserved: boolean;
+  hazardKnown: boolean;
   trendKnown: boolean;
-  depthKnown: boolean;
-  closureKnown: boolean;
-  barriersKnown: boolean;
+  metricKnown: boolean;
+  accessKnown: boolean;
+  peopleKnown: boolean;
 };
 
 type StreamController = ReturnType<typeof useAssemblyAIStream>;
 
 function LiveOperationsPanel({
+  scenario,
   stage,
   revealedWords,
   playingReport,
   onPlayReport,
   summary,
+  liveIncident,
+  analysisState,
+  analysisError,
   briefingVisible,
   onSpeakBriefing,
   stream,
+  onStartLive,
+  onStopLive,
+  actionsIncident,
+  actionStatuses,
+  onDispatchAction,
 }: {
+  scenario: Scenario;
   stage: StreamStage;
   revealedWords: number;
   playingReport: ReportId | null;
-  onPlayReport: (report: Report) => void;
+  onPlayReport: (report: ScenarioReport) => void;
   summary: SummaryState;
+  liveIncident: IncidentSnapshot | null;
+  analysisState: AnalysisState;
+  analysisError: string;
   briefingVisible: boolean;
   onSpeakBriefing: () => void;
   stream: StreamController;
+  onStartLive: () => Promise<void>;
+  onStopLive: () => void;
+  actionsIncident: IncidentSnapshot | null;
+  actionStatuses: ActionStatuses;
+  onDispatchAction: (actionId: ActionId) => void;
 }) {
   const activeReport =
-    stage === 'public' ? publicReport : stage === 'field' ? fieldReport : null;
+    stage === 'public'
+      ? scenario.publicReport
+      : stage === 'field'
+        ? scenario.fieldReport
+        : null;
+  const realStreamVisible =
+    stream.state !== 'idle' || stream.finalTurns.length > 0 || liveIncident;
 
   return (
     <aside className="border-t border-white/8 bg-[#0b1113] lg:border-l lg:border-t-0">
@@ -520,43 +716,89 @@ function LiveOperationsPanel({
         <h2 className="text-xs font-semibold">Live crisis stream</h2>
         <Badge
           className={`ml-auto font-mono text-[9px] ${
-            activeReport
+            activeReport || stream.state === 'listening'
               ? 'bg-[#4dbb91]/12 text-[#78d0ae]'
-              : 'bg-white/7 text-[#9baba7]'
+              : analysisState === 'analyzing'
+                ? 'bg-[#d79b39]/12 text-[#e6b35f]'
+                : 'bg-white/7 text-[#9baba7]'
           }`}
         >
-          {activeReport ? 'LIVE' : stage === 'complete' ? 'COMPLETE' : 'READY'}
+          {stream.state === 'listening' || activeReport
+            ? 'LIVE'
+            : analysisState === 'analyzing'
+              ? 'ANALYZING'
+              : liveIncident || stage === 'complete'
+                ? 'COMPLETE'
+                : 'READY'}
         </Badge>
       </div>
 
       <div className="space-y-3 p-4">
-        <LiveTranscriptCard
-          report={publicReport}
-          active={stage === 'public'}
-          complete={stage === 'field' || stage === 'complete'}
-          revealedWords={stage === 'public' ? revealedWords : 0}
-          playing={playingReport === 'public'}
-          onPlay={onPlayReport}
+        {realStreamVisible ? (
+          <LiveMicrophone
+            stream={stream}
+            analysisState={analysisState}
+            analysisError={analysisError}
+            onStart={onStartLive}
+            onStop={onStopLive}
+          />
+        ) : (
+          <>
+            <LiveTranscriptCard
+              report={scenario.publicReport}
+              active={stage === 'public'}
+              complete={stage === 'field' || stage === 'complete'}
+              revealedWords={stage === 'public' ? revealedWords : 0}
+              playing={playingReport === 'public'}
+              onPlay={onPlayReport}
+            />
+
+            {(stage === 'field' || stage === 'complete') && (
+              <LiveTranscriptCard
+                report={scenario.fieldReport}
+                active={stage === 'field'}
+                complete={stage === 'complete'}
+                revealedWords={stage === 'field' ? revealedWords : 0}
+                playing={playingReport === 'field'}
+                onPlay={onPlayReport}
+              />
+            )}
+          </>
+        )}
+
+        <LiveSummary
+          scenario={scenario}
+          summary={summary}
+          stage={stage}
+          liveIncident={liveIncident}
+          analysisState={analysisState}
         />
 
-        {(stage === 'field' || stage === 'complete') && (
-          <LiveTranscriptCard
-            report={fieldReport}
-            active={stage === 'field'}
-            complete={stage === 'complete'}
-            revealedWords={stage === 'field' ? revealedWords : 0}
-            playing={playingReport === 'field'}
-            onPlay={onPlayReport}
+        {(stage === 'complete' || liveIncident) && (
+          <BriefingPanel
+            text={liveIncident?.summary ?? scenario.briefing}
+            visible={briefingVisible}
+            onSpeak={onSpeakBriefing}
           />
         )}
 
-        <LiveSummary summary={summary} stage={stage} />
-
-        {stage === 'complete' && (
-          <BriefingPanel visible={briefingVisible} onSpeak={onSpeakBriefing} />
+        {actionsIncident && (
+          <ResponseActions
+            incident={actionsIncident}
+            statuses={actionStatuses}
+            onDispatch={onDispatchAction}
+          />
         )}
 
-        <LiveMicrophone stream={stream} />
+        {!realStreamVisible && (
+          <LiveMicrophone
+            stream={stream}
+            analysisState={analysisState}
+            analysisError={analysisError}
+            onStart={onStartLive}
+            onStop={onStopLive}
+          />
+        )}
       </div>
     </aside>
   );
@@ -570,12 +812,12 @@ function LiveTranscriptCard({
   playing,
   onPlay,
 }: {
-  report: Report;
+  report: ScenarioReport;
   active: boolean;
   complete: boolean;
   revealedWords: number;
   playing: boolean;
-  onPlay: (report: Report) => void;
+  onPlay: (report: ScenarioReport) => void;
 }) {
   const words = report.text.split(' ');
   const transcript = complete
@@ -624,26 +866,9 @@ function LiveTranscriptCard({
 
       {(active || complete) && (
         <>
-          <div className="waveform" aria-hidden="true">
-            {Array.from({ length: 42 }, (_, index) => (
-              <span
-                key={index}
-                className={active ? 'animate-pulse' : ''}
-                style={{
-                  height: `${8 + ((index * 17) % 27)}px`,
-                  animationDelay: `${index * 22}ms`,
-                }}
-              />
-            ))}
-          </div>
+          <Waveform active={active} />
           <div className="min-h-[88px] border-t border-white/8 p-3">
-            <div className="flex items-center gap-2 font-mono text-[9px] uppercase tracking-[0.11em] text-[#6f807c]">
-              <span
-                className={`size-1.5 rounded-full ${active ? 'animate-pulse bg-[#65c9a3]' : 'bg-[#667773]'}`}
-                aria-hidden="true"
-              />
-              Live transcript
-            </div>
+            <TranscriptLabel active={active} />
             <p
               className="mt-2 text-xs leading-relaxed text-[#cad5d2]"
               aria-live="polite"
@@ -661,34 +886,52 @@ function LiveTranscriptCard({
 }
 
 function LiveSummary({
+  scenario,
   summary,
   stage,
+  liveIncident,
+  analysisState,
 }: {
+  scenario: Scenario;
   summary: SummaryState;
   stage: StreamStage;
+  liveIncident: IncidentSnapshot | null;
+  analysisState: AnalysisState;
 }) {
-  const rows = [
-    [
-      'Location',
-      summary.locationKnown ? 'Ben Thuy Bridge 1, north approach' : 'Listening',
-    ],
-    ['Water', summary.floodObserved ? 'Moving across roadway' : 'Listening'],
-    [
-      'Trend',
-      summary.trendKnown ? 'Rising, caller observed' : 'Not established',
-    ],
-    [
-      'Depth',
-      summary.depthKnown
-        ? '35 cm'
-        : summary.floodObserved
-          ? 'Unknown'
-          : 'Not established',
-    ],
-    ['Access', summary.closureKnown ? 'Impassable' : 'Not established'],
-    ['Barriers', summary.barriersKnown ? 'In place' : 'Not established'],
-  ];
-  const live = stage === 'public' || stage === 'field';
+  const incident = liveIncident ?? scenario.incident;
+  const live =
+    stage === 'public' || stage === 'field' || analysisState === 'analyzing';
+  const listening =
+    analysisState === 'analyzing' ? 'Analyzing latest turn' : 'Listening';
+  const rows = liveIncident
+    ? [
+        ['Hazard', hazardLabels[incident.hazardType]],
+        ['Location', incident.locationName],
+        ['Trend', incident.trend],
+        [incident.metricLabel, incident.metricValue],
+        ['Access', titleCase(incident.access)],
+        ['People', incident.peopleAtRisk],
+      ]
+    : [
+        [
+          'Hazard',
+          summary.hazardKnown ? hazardLabels[incident.hazardType] : listening,
+        ],
+        ['Location', summary.locationKnown ? incident.locationName : listening],
+        ['Trend', summary.trendKnown ? incident.trend : 'Not established'],
+        [
+          incident.metricLabel,
+          summary.metricKnown ? incident.metricValue : 'Not established',
+        ],
+        [
+          'Access',
+          summary.accessKnown ? titleCase(incident.access) : 'Not established',
+        ],
+        [
+          'People',
+          summary.peopleKnown ? incident.peopleAtRisk : 'Not established',
+        ],
+      ];
 
   return (
     <section className="rounded-md border border-[#d79b39]/20 bg-[#11191b] p-3">
@@ -706,14 +949,14 @@ function LiveSummary({
         {rows.map(([label, value]) => (
           <div
             key={label}
-            className="grid grid-cols-[72px_1fr] gap-2 py-2 text-[11px]"
+            className="grid grid-cols-[82px_1fr] gap-2 py-2 text-[11px]"
           >
             <span className="font-mono text-[9px] uppercase tracking-[0.08em] text-[#697a76]">
               {label}
             </span>
             <span
               className={`transition-colors ${
-                value === 'Listening'
+                value === listening
                   ? 'animate-pulse text-[#71827e]'
                   : value === 'Not established'
                     ? 'text-[#687975]'
@@ -725,18 +968,25 @@ function LiveSummary({
           </div>
         ))}
       </div>
+      {(liveIncident || stage === 'complete') && (
+        <p className="mt-3 text-[10px] leading-relaxed text-[#9caeaa]">
+          {incident.summary}
+        </p>
+      )}
       <p className="mt-3 font-mono text-[9px] leading-relaxed text-[#70817d]">
-        Summary fields remain linked to their source transcript and update as
-        new audio arrives.
+        Missing facts remain unknown. Recommendations never execute without
+        operator authorization.
       </p>
     </section>
   );
 }
 
 function BriefingPanel({
+  text,
   visible,
   onSpeak,
 }: {
+  text: string;
   visible: boolean;
   onSpeak: () => void;
 }) {
@@ -752,12 +1002,7 @@ function BriefingPanel({
             <Check className="size-3" aria-hidden="true" />
             Incident memory synchronized
           </div>
-          <p className="text-[11px] leading-relaxed text-[#c8d5d1]">
-            Ben Thuy Bridge 1 is impassable on the northern approach. Road Team
-            3 reported approximately 35 cm of moving water with barriers in
-            place. Use Vinh University as the staging destination and confirm an
-            alternate route with coordination.
-          </p>
+          <p className="text-[11px] leading-relaxed text-[#c8d5d1]">{text}</p>
         </div>
       )}
       <Button
@@ -773,60 +1018,131 @@ function BriefingPanel({
   );
 }
 
-function LiveMicrophone({ stream }: { stream: StreamController }) {
+function LiveMicrophone({
+  stream,
+  analysisState,
+  analysisError,
+  onStart,
+  onStop,
+}: {
+  stream: StreamController;
+  analysisState: AnalysisState;
+  analysisError: string;
+  onStart: () => Promise<void>;
+  onStop: () => void;
+}) {
   const listening = stream.state === 'listening';
-  const transcript = stream.finalTranscript || stream.partialTranscript;
+  const transcript = [stream.finalTranscript, stream.partialTranscript]
+    .filter(Boolean)
+    .join(' ');
 
   return (
-    <section className="border-t border-white/8 pt-3">
+    <section className="rounded-md border border-[#4dbb91]/18 bg-[#0f1719] p-3">
       <div className="flex items-center gap-2">
         <Mic
           className={`size-3.5 ${listening ? 'text-[#65c9a3]' : 'text-[#71827e]'}`}
           aria-hidden="true"
         />
-        <h3 className="text-[11px] font-medium">Optional live English STT</h3>
-        <Badge className="ml-auto bg-white/6 font-mono text-[9px] text-[#788985]">
-          U3 PRO
+        <h3 className="text-[11px] font-medium">Live multi-hazard intake</h3>
+        <Badge className="ml-auto bg-white/6 font-mono text-[8px] text-[#788985]">
+          U3 PRO + LLM
         </Badge>
       </div>
       <p className="mt-2 text-[10px] leading-relaxed text-[#687975]">
-        Uses AssemblyAI Universal-3 Pro Streaming when a server-side API key is
-        configured.
+        Speak naturally. Finalized turns are transcribed by AssemblyAI and
+        converted into a structured incident record.
       </p>
-      {transcript && (
-        <p
-          className="mt-2 rounded-md bg-black/20 p-2 text-[11px] leading-relaxed text-[#bdcac6]"
-          aria-live="polite"
-        >
-          {transcript}
+
+      {(listening || transcript) && (
+        <div className="mt-3 overflow-hidden rounded-md border border-white/8 bg-black/15">
+          <Waveform active={listening} />
+          <div className="border-t border-white/8 p-2.5">
+            <TranscriptLabel active={listening} />
+            <p
+              className="mt-2 text-[11px] leading-relaxed text-[#bdcac6]"
+              aria-live="polite"
+            >
+              {transcript || 'Listening for the first report…'}
+            </p>
+          </div>
+        </div>
+      )}
+
+      {analysisState === 'analyzing' && (
+        <p className="mt-2 flex items-center gap-1.5 text-[10px] text-[#e0ad59]">
+          <Sparkles className="size-3 animate-pulse" aria-hidden="true" />
+          Updating incident memory from the latest finalized turn…
         </p>
       )}
-      {stream.error && (
+      {(stream.error || analysisError) && (
         <p
-          className="mt-2 text-[10px] leading-relaxed text-[#d7a95f]"
+          className="mt-2 flex items-start gap-1.5 text-[10px] leading-relaxed text-[#d7a95f]"
           role="alert"
         >
-          {stream.error}
+          <AlertTriangle
+            className="mt-0.5 size-3 shrink-0"
+            aria-hidden="true"
+          />
+          {stream.error || analysisError}
         </p>
       )}
       <Button
         size="sm"
         variant="outline"
-        className="mt-2 w-full border-white/10 bg-white/[0.025] text-[#aebdb9]"
-        onClick={listening ? stream.stop : stream.start}
+        className="mt-3 w-full border-white/10 bg-white/[0.025] text-[#aebdb9]"
+        disabled={stream.state === 'connecting'}
+        onClick={() => {
+          if (listening) onStop();
+          else void onStart();
+        }}
       >
-        {listening ? (
+        {stream.state === 'connecting' ? (
+          <LoaderCircle className="size-3.5 animate-spin" aria-hidden="true" />
+        ) : listening ? (
           <Pause className="size-3.5" aria-hidden="true" />
         ) : (
           <Mic className="size-3.5" aria-hidden="true" />
         )}
         {listening
-          ? 'Stop microphone'
+          ? 'Stop live intake'
           : stream.state === 'connecting'
-            ? 'Connecting'
-            : 'Start live mic'}
+            ? 'Connecting securely'
+            : transcript
+              ? 'Start a new live intake'
+              : 'Start live incident'}
       </Button>
     </section>
+  );
+}
+
+function Waveform({ active }: { active: boolean }) {
+  return (
+    <div className="waveform" aria-hidden="true">
+      {Array.from({ length: 42 }, (_, index) => (
+        <span
+          key={index}
+          className={active ? 'animate-pulse' : ''}
+          style={{
+            height: `${8 + ((index * 17) % 27)}px`,
+            animationDelay: `${index * 22}ms`,
+          }}
+        />
+      ))}
+    </div>
+  );
+}
+
+function TranscriptLabel({ active }: { active: boolean }) {
+  return (
+    <div className="flex items-center gap-2 font-mono text-[9px] uppercase tracking-[0.11em] text-[#6f807c]">
+      <span
+        className={`size-1.5 rounded-full ${
+          active ? 'animate-pulse bg-[#65c9a3]' : 'bg-[#667773]'
+        }`}
+        aria-hidden="true"
+      />
+      Live transcript
+    </div>
   );
 }
 
@@ -834,8 +1150,8 @@ function TrackedPlaces({
   selectedLocation,
   onSelect,
 }: {
-  selectedLocation: LocationId;
-  onSelect: (location: LocationId) => void;
+  selectedLocation: KnownLocationId;
+  onSelect: (location: KnownLocationId) => void;
 }) {
   return (
     <div className="mt-4">
@@ -843,8 +1159,8 @@ function TrackedPlaces({
         <Route className="size-3.5" aria-hidden="true" />
         Tracked places
       </div>
-      <div className="grid gap-2 sm:grid-cols-2 xl:grid-cols-4">
-        {(Object.keys(landmarks) as LocationId[]).map((id) => {
+      <div className="grid gap-2 sm:grid-cols-2 xl:grid-cols-5">
+        {(Object.keys(landmarks) as KnownLocationId[]).map((id) => {
           const place = landmarks[id];
           const active = id === selectedLocation;
           return (
@@ -875,25 +1191,27 @@ function TrackedPlaces({
 
 function StatusBadge({
   status,
-  isBridge,
+  isIncident,
+  incident,
 }: {
   status: 'idle' | 'reported' | 'verified';
-  isBridge: boolean;
+  isIncident: boolean;
+  incident: IncidentSnapshot;
 }) {
-  if (!isBridge) {
+  if (!isIncident) {
     return <Badge className="bg-white/7 text-[#9baba7]">Reference place</Badge>;
   }
   if (status === 'verified') {
     return (
       <Badge className="border-[#dd644c]/35 bg-[#dd644c]/12 text-[#ef8f7c]">
-        Impassable · 35 cm
+        {hazardLabels[incident.hazardType]} · {incident.metricValue}
       </Badge>
     );
   }
   if (status === 'reported') {
     return (
       <Badge className="border-[#3b91aa]/35 bg-[#3b91aa]/12 text-[#9ed5e2]">
-        Flooding detected
+        {hazardLabels[incident.hazardType]} detected
       </Badge>
     );
   }
@@ -911,18 +1229,23 @@ function Metric({
 }) {
   return (
     <div className="bg-[#101719] px-3 py-2.5">
-      <p className="font-mono text-[9px] uppercase tracking-[0.1em] text-[#63736f]">
-        {label}
-      </p>
-      <p className="mt-1 flex items-center gap-2 text-xs font-medium text-[#cbd5d2]">
+      <div className="flex items-center gap-2">
+        <p className="font-mono text-[9px] uppercase tracking-[0.1em] text-[#657672]">
+          {label}
+        </p>
         {live && (
           <span
             className="size-1.5 animate-pulse rounded-full bg-[#65c9a3]"
             aria-hidden="true"
           />
         )}
-        {value}
-      </p>
+      </div>
+      <p className="mt-1 text-xs text-[#cbd6d3]">{value}</p>
     </div>
   );
+}
+
+function titleCase(value: string) {
+  if (!value) return value;
+  return value.charAt(0).toUpperCase() + value.slice(1).replaceAll('_', ' ');
 }

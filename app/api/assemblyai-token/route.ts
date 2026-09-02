@@ -1,5 +1,7 @@
+import { serverEnv } from '@/lib/server-env';
+
 export async function GET() {
-  const apiKey = process.env.ASSEMBLYAI_API_KEY;
+  const apiKey = serverEnv('ASSEMBLYAI_API_KEY');
 
   if (!apiKey) {
     return Response.json(
