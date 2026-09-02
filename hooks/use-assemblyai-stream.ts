@@ -29,6 +29,15 @@ export function useAssemblyAIStream() {
     setState('idle');
   }, []);
 
+  const reset = useCallback(() => {
+    cleanupRef.current?.();
+    cleanupRef.current = null;
+    setState('idle');
+    setPartialTranscript('');
+    setFinalTranscript('');
+    setError('');
+  }, []);
+
   const start = useCallback(async () => {
     stop();
     setError('');
@@ -120,5 +129,13 @@ export function useAssemblyAIStream() {
 
   useEffect(() => stop, [stop]);
 
-  return { state, partialTranscript, finalTranscript, error, start, stop };
+  return {
+    state,
+    partialTranscript,
+    finalTranscript,
+    error,
+    start,
+    stop,
+    reset,
+  };
 }

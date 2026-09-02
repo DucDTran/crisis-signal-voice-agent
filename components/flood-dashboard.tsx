@@ -16,6 +16,7 @@ import {
   Play,
   Radio,
   RefreshCw,
+  Route,
   Settings,
   ShieldCheck,
   TriangleAlert,
@@ -157,7 +158,7 @@ export function FloodDashboard() {
 
   function resetExercise() {
     window.speechSynthesis?.cancel();
-    stream.stop();
+    stream.reset();
     setPhase('reported');
     setSelectedLocation('bridge');
     setPlayingReport(null);
@@ -284,7 +285,6 @@ export function FloodDashboard() {
               <VinhMap
                 status={isVerified ? 'verified' : 'reported'}
                 selectedLocation={selectedLocation}
-                onSelectLocation={setSelectedLocation}
               />
               <div className="border-t border-white/8 bg-[#0c1214] p-4 lg:p-5">
                 <div className="flex flex-wrap items-start gap-4">
@@ -332,6 +332,39 @@ export function FloodDashboard() {
                     label="Last changed"
                     value={isVerified ? '11:18:42' : '11:06:24'}
                   />
+                </div>
+
+                <div className="mt-4">
+                  <div className="mb-2 flex items-center gap-2 font-mono text-[10px] uppercase tracking-[0.11em] text-[#70817d]">
+                    <Route className="size-3.5" aria-hidden="true" />
+                    Tracked places
+                  </div>
+                  <div className="grid gap-2 sm:grid-cols-2 xl:grid-cols-4">
+                    {(Object.keys(landmarks) as LocationId[]).map((id) => {
+                      const place = landmarks[id];
+                      const active = id === selectedLocation;
+                      return (
+                        <button
+                          key={id}
+                          type="button"
+                          onClick={() => setSelectedLocation(id)}
+                          aria-pressed={active}
+                          className={`min-w-0 rounded-md border px-3 py-2 text-left transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#d79b39] ${
+                            active
+                              ? 'border-[#d79b39]/35 bg-[#d79b39]/9'
+                              : 'border-white/8 bg-[#101719] hover:bg-white/[0.05]'
+                          }`}
+                        >
+                          <span className="block truncate text-[11px] font-medium text-[#cbd5d2]">
+                            {place.name}
+                          </span>
+                          <span className="mt-0.5 block truncate text-[9px] text-[#687975]">
+                            {place.english}
+                          </span>
+                        </button>
+                      );
+                    })}
+                  </div>
                 </div>
 
                 {isVerified && (

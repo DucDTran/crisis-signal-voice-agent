@@ -139,7 +139,6 @@ body {
   box-shadow:
     0 0 0 1px rgb(234 240 238 / 28%),
     0 5px 18px rgb(0 0 0 / 45%);
-  cursor: pointer;
 }
 
 .map-marker-core {

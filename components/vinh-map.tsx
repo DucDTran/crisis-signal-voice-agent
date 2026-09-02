@@ -8,7 +8,6 @@ export type LocationId = 'bridge' | 'station' | 'market' | 'university';
 type VinhMapProps = {
   status: 'reported' | 'verified';
   selectedLocation: LocationId;
-  onSelectLocation: (location: LocationId) => void;
 };
 
 const locations = [
@@ -42,23 +41,17 @@ const locations = [
   },
 ];
 
-export function VinhMap({
-  status,
-  selectedLocation,
-  onSelectLocation,
-}: VinhMapProps) {
+export function VinhMap({ status, selectedLocation }: VinhMapProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const mapRef = useRef<MapLibreMap | null>(null);
   const markerRefs = useRef<Map<LocationId, MapLibreMarker>>(new Map());
-  const onSelectRef = useRef(onSelectLocation);
   const selectedRef = useRef(selectedLocation);
   const statusRef = useRef(status);
 
   useEffect(() => {
-    onSelectRef.current = onSelectLocation;
     selectedRef.current = selectedLocation;
     statusRef.current = status;
-  }, [onSelectLocation, selectedLocation, status]);
+  }, [selectedLocation, status]);
 
   useEffect(() => {
     if (!containerRef.current || mapRef.current) return;
@@ -118,8 +111,7 @@ export function VinhMap({
       });
 
       for (const location of locations) {
-        const marker = document.createElement('button');
-        marker.type = 'button';
+        const marker = document.createElement('div');
         marker.className = `map-marker map-marker-${location.kind}`;
         marker.dataset.location = location.id;
         marker.classList.toggle(
@@ -127,14 +119,8 @@ export function VinhMap({
           location.id === selectedRef.current,
         );
         if (location.id === 'bridge') marker.dataset.status = statusRef.current;
-        marker.setAttribute(
-          'aria-label',
-          `${location.name}, ${location.english}`,
-        );
+        marker.setAttribute('aria-hidden', 'true');
         marker.innerHTML = '<span class="map-marker-core"></span>';
-        marker.addEventListener('click', () =>
-          onSelectRef.current(location.id),
-        );
 
         const mapMarker = new maplibregl.Marker({ element: marker })
           .setLngLat(location.coordinates)
