@@ -63,6 +63,7 @@ export type Scenario = {
   incident: IncidentSnapshot;
   publicReport: ScenarioReport;
   fieldReport: ScenarioReport;
+  operatorPrompt: string;
   briefing: string;
 };
 
@@ -149,6 +150,8 @@ export const scenarios: Record<ScenarioId, Scenario> = {
       source: 'FIELD RADIO · 00:21',
       text: 'Road Team 3 reporting to coordination. At 11:18, moving water on the northern approach to Ben Thuy Bridge 1 is approximately 35 centimetres deep. The route is impassable. Barriers are in place. No road surface damage is visible.',
     },
+    operatorPrompt:
+      'Operator: I have your location at Ben Thuy Bridge 1. Can you confirm whether anyone is trapped or needs immediate rescue, and whether the water is still rising?',
     incident: {
       hazardType: 'flood',
       locationId: 'bridge',
@@ -190,6 +193,8 @@ export const scenarios: Record<ScenarioId, Scenario> = {
       source: 'FIELD RADIO · 00:24',
       text: 'Civil defence unit at Vinh Market. The eastern entrance is unsafe and restricted. Six people are sheltering in the interior hall with no injuries reported. The utility hazard is isolated but technical assessment and controlled evacuation are required.',
     },
+    operatorPrompt:
+      'Operator: I have the market entrance marked. Please move away from the hanging line and confirm how many people are sheltering inside while the field team approaches.',
     incident: {
       hazardType: 'tropical_storm',
       locationId: 'market',
@@ -231,6 +236,8 @@ export const scenarios: Record<ScenarioId, Scenario> = {
       source: 'FIELD RADIO · 00:23',
       text: 'Survey Team 2 at Nui Quyet access road. The landslide is about sixty metres across and the route is completely blocked. Eight people are isolated in the minibus with no injuries. The slope remains unstable and requires geotechnical assessment.',
     },
+    operatorPrompt:
+      'Operator: I have the Nui Quyet access road. Is the minibus stable, and can everyone remain inside while we establish a safe approach below the unstable slope?',
     incident: {
       hazardType: 'landslide',
       locationId: 'mountain',

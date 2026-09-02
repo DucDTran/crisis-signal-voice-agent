@@ -25,7 +25,7 @@ import {
   Volume2,
   Waves,
 } from 'lucide-react';
-import { useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 
 import { ResponseActions } from '@/components/response-actions';
 import { Badge } from '@/components/ui/badge';
@@ -109,6 +109,12 @@ export function FloodDashboard() {
   const [analysisState, setAnalysisState] = useState<AnalysisState>('idle');
   const [analysisError, setAnalysisError] = useState('');
   const [actionStatuses, setActionStatuses] = useState<ActionStatuses>({});
+  const stageRef = useRef<StreamStage>('ready');
+  const speechBoundarySeen = useRef<Record<ReportId, boolean>>({
+    public: false,
+    field: false,
+  });
+  const fallbackTimers = useRef<Partial<Record<ReportId, number>>>({});
   const stream = useAssemblyAIStream();
 
   const scenario = scenarios[scenarioId];
@@ -169,29 +175,78 @@ export function FloodDashboard() {
   const selectedIsIncident = selectedLocation === incidentLocation;
   const actionsIncident =
     liveIncident ?? (stage === 'complete' ? scenario.incident : null);
+  const reasoningEntries = buildReasoningEntries({
+    stage,
+    liveIncident,
+    analysisState,
+    streamTurns: stream.finalTurns.length,
+    summary: { locationKnown, hazardKnown, trendKnown, metricKnown, accessKnown, peopleKnown },
+  });
+
+  const speakSimulationReport = useCallback((report: ScenarioReport) => {
+    const totalWords = report.text.split(/\s+/).filter(Boolean).length;
+    speechBoundarySeen.current[report.id] = false;
+    if (!('speechSynthesis' in window)) {
+      if (stageRef.current === report.id) setRevealedWords(totalWords);
+      return;
+    }
+
+    const clearFallback = () => {
+      const timer = fallbackTimers.current[report.id];
+      if (timer) window.clearInterval(timer);
+      delete fallbackTimers.current[report.id];
+    };
+    const utterance = new SpeechSynthesisUtterance(report.text);
+    utterance.lang = 'en-US';
+    utterance.rate = report.id === 'public' ? 0.96 : 0.98;
+    utterance.onstart = () => {
+      const startedAt = Date.now();
+      clearFallback();
+      fallbackTimers.current[report.id] = window.setInterval(() => {
+        if (speechBoundarySeen.current[report.id]) return;
+        if (stageRef.current !== report.id) return;
+        const elapsedWords = Math.floor((Date.now() - startedAt) / 220);
+        setRevealedWords((current) => Math.min(totalWords, Math.max(current, elapsedWords)));
+      }, 100);
+    };
+    utterance.onboundary = (event) => {
+      speechBoundarySeen.current[report.id] = true;
+      if (stageRef.current !== report.id) return;
+      const spoken = report.text.slice(0, event.charIndex).trim();
+      const words = spoken ? spoken.split(/\s+/).length : 0;
+      setRevealedWords((current) => Math.min(totalWords, Math.max(current, words)));
+    };
+    utterance.onend = () => {
+      clearFallback();
+      if (stageRef.current === report.id) setRevealedWords(totalWords);
+    };
+    utterance.onerror = () => {
+      clearFallback();
+      if (stageRef.current === report.id) setRevealedWords(totalWords);
+    };
+    window.speechSynthesis.speak(utterance);
+  }, []);
 
   useEffect(() => {
-    if (!activeReport) return;
-    const totalWords = activeReport.text.split(' ').length;
-    const interval = window.setInterval(() => {
-      setRevealedWords((current) => Math.min(totalWords, current + 1));
-    }, 145);
-    return () => window.clearInterval(interval);
-  }, [activeReport]);
+    stageRef.current = stage;
+  }, [stage]);
 
   useEffect(() => {
     if (!activeReport || revealedWords < activeWords.length) return;
     const delay = window.setTimeout(() => {
       if (stage === 'public') {
+        stageRef.current = 'field';
         setStage('field');
         setRevealedWords(0);
+        speakSimulationReport(fieldReport);
       } else if (stage === 'field') {
+        stageRef.current = 'complete';
         setStage('complete');
         setBriefingVisible(true);
       }
     }, 700);
     return () => window.clearTimeout(delay);
-  }, [activeReport, activeWords.length, revealedWords, stage]);
+  }, [activeReport, activeWords.length, fieldReport, revealedWords, speakSimulationReport, stage]);
 
   useEffect(() => {
     const transcript = stream.finalTurns.join(' ').trim();
@@ -241,32 +296,23 @@ export function FloodDashboard() {
     return () => window.speechSynthesis?.cancel();
   }, []);
 
-  function queueExerciseAudio() {
-    if (!('speechSynthesis' in window)) return;
-    window.speechSynthesis.cancel();
-    for (const report of [publicReport, fieldReport]) {
-      const utterance = new SpeechSynthesisUtterance(report.text);
-      utterance.lang = 'en-US';
-      utterance.rate = report.id === 'public' ? 0.96 : 0.98;
-      window.speechSynthesis.speak(utterance);
-    }
-  }
-
   function startSimulation() {
     stream.reset();
     setLiveIncident(null);
     setAnalysisState('idle');
     setAnalysisError('');
     setActionStatuses({});
+    stageRef.current = 'public';
     setStage('public');
     setRevealedWords(0);
     setSelectedLocation(scenario.incident.locationId as KnownLocationId);
     setBriefingVisible(false);
-    queueExerciseAudio();
+    speakSimulationReport(publicReport);
   }
 
   function resetSimulation() {
     window.speechSynthesis?.cancel();
+    stageRef.current = 'ready';
     stream.reset();
     setStage('ready');
     setRevealedWords(0);
@@ -282,6 +328,7 @@ export function FloodDashboard() {
   function changeScenario(value: ScenarioId | null) {
     if (!value) return;
     window.speechSynthesis?.cancel();
+    stageRef.current = 'ready';
     stream.reset();
     const nextScenario = scenarios[value];
     setScenarioId(value);
@@ -298,6 +345,7 @@ export function FloodDashboard() {
 
   async function startLiveIncident() {
     window.speechSynthesis?.cancel();
+    stageRef.current = 'ready';
     setStage('ready');
     setRevealedWords(0);
     setPlayingReport(null);
@@ -339,6 +387,15 @@ export function FloodDashboard() {
     const utterance = new SpeechSynthesisUtterance(text);
     utterance.lang = 'en-US';
     utterance.rate = 0.94;
+    window.speechSynthesis.speak(utterance);
+  }
+
+  function speakOperatorPrompt(text: string) {
+    if (!('speechSynthesis' in window)) return;
+    window.speechSynthesis.cancel();
+    const utterance = new SpeechSynthesisUtterance(text.replace(/^Operator:\s*/i, ''));
+    utterance.lang = 'en-US';
+    utterance.rate = 0.98;
     window.speechSynthesis.speak(utterance);
   }
 
@@ -571,6 +628,41 @@ export function FloodDashboard() {
                   selectedLocation={selectedLocation}
                   onSelect={setSelectedLocation}
                 />
+
+                <div className="mt-5 space-y-3">
+                  <LiveSummary
+                    scenario={scenario}
+                    summary={{
+                      locationKnown,
+                      hazardKnown,
+                      trendKnown,
+                      metricKnown,
+                      accessKnown,
+                      peopleKnown,
+                    }}
+                    stage={stage}
+                    liveIncident={liveIncident}
+                    analysisState={analysisState}
+                  />
+
+                  {(stage === 'complete' || liveIncident) && (
+                    <BriefingPanel
+                      text={liveIncident?.summary ?? scenario.briefing}
+                      visible={briefingVisible}
+                      onSpeak={speakBriefing}
+                    />
+                  )}
+
+                  {actionsIncident && (
+                    <ResponseActions
+                      incident={actionsIncident}
+                      statuses={actionStatuses}
+                      onDispatch={dispatchAction}
+                    />
+                  )}
+
+                  <ReasoningTrail entries={reasoningEntries} />
+                </div>
               </div>
             </div>
           </section>
@@ -581,25 +673,13 @@ export function FloodDashboard() {
             revealedWords={revealedWords}
             playingReport={playingReport}
             onPlayReport={playReport}
-            summary={{
-              locationKnown,
-              hazardKnown,
-              trendKnown,
-              metricKnown,
-              accessKnown,
-              peopleKnown,
-            }}
             liveIncident={liveIncident}
             analysisState={analysisState}
             analysisError={analysisError}
-            briefingVisible={briefingVisible}
-            onSpeakBriefing={speakBriefing}
             stream={stream}
             onStartLive={startLiveIncident}
             onStopLive={stream.stop}
-            actionsIncident={actionsIncident}
-            actionStatuses={actionStatuses}
-            onDispatchAction={dispatchAction}
+            onSpeakOperator={speakOperatorPrompt}
           />
         </div>
       </main>
@@ -636,8 +716,8 @@ function Sidebar({ liveMode }: { liveMode: boolean }) {
             {liveMode ? 'Live pipeline active' : 'Streaming pipeline ready'}
           </div>
           <p className="mt-2 font-mono text-[10px] leading-relaxed text-[#667773]">
-            AI recommendations require operator authorization. No external calls
-            are made by this demo.
+            Live intake uses AssemblyAI Universal-3 Pro. Scenario replay uses
+            local speech synthesis so the exercise works without a microphone.
           </p>
         </div>
         <Button
@@ -669,36 +749,26 @@ function LiveOperationsPanel({
   revealedWords,
   playingReport,
   onPlayReport,
-  summary,
   liveIncident,
   analysisState,
   analysisError,
-  briefingVisible,
-  onSpeakBriefing,
   stream,
   onStartLive,
   onStopLive,
-  actionsIncident,
-  actionStatuses,
-  onDispatchAction,
+  onSpeakOperator,
 }: {
   scenario: Scenario;
   stage: StreamStage;
   revealedWords: number;
   playingReport: ReportId | null;
   onPlayReport: (report: ScenarioReport) => void;
-  summary: SummaryState;
   liveIncident: IncidentSnapshot | null;
   analysisState: AnalysisState;
   analysisError: string;
-  briefingVisible: boolean;
-  onSpeakBriefing: () => void;
   stream: StreamController;
   onStartLive: () => Promise<void>;
   onStopLive: () => void;
-  actionsIncident: IncidentSnapshot | null;
-  actionStatuses: ActionStatuses;
-  onDispatchAction: (actionId: ActionId) => void;
+  onSpeakOperator: (text: string) => void;
 }) {
   const activeReport =
     stage === 'public'
@@ -735,13 +805,16 @@ function LiveOperationsPanel({
 
       <div className="space-y-3 p-4">
         {realStreamVisible ? (
-          <LiveMicrophone
-            stream={stream}
-            analysisState={analysisState}
-            analysisError={analysisError}
-            onStart={onStartLive}
-            onStop={onStopLive}
-          />
+          <>
+            <LiveMicrophone
+              stream={stream}
+              analysisState={analysisState}
+              analysisError={analysisError}
+              onStart={onStartLive}
+              onStop={onStopLive}
+            />
+            {liveIncident && <LiveOperatorPrompt incident={liveIncident} />}
+          </>
         ) : (
           <>
             <LiveTranscriptCard
@@ -752,6 +825,10 @@ function LiveOperationsPanel({
               playing={playingReport === 'public'}
               onPlay={onPlayReport}
             />
+
+            {(stage === 'field' || stage === 'complete') && (
+              <OperatorTurnCard scenario={scenario} onSpeak={onSpeakOperator} />
+            )}
 
             {(stage === 'field' || stage === 'complete') && (
               <LiveTranscriptCard
@@ -766,30 +843,6 @@ function LiveOperationsPanel({
           </>
         )}
 
-        <LiveSummary
-          scenario={scenario}
-          summary={summary}
-          stage={stage}
-          liveIncident={liveIncident}
-          analysisState={analysisState}
-        />
-
-        {(stage === 'complete' || liveIncident) && (
-          <BriefingPanel
-            text={liveIncident?.summary ?? scenario.briefing}
-            visible={briefingVisible}
-            onSpeak={onSpeakBriefing}
-          />
-        )}
-
-        {actionsIncident && (
-          <ResponseActions
-            incident={actionsIncident}
-            statuses={actionStatuses}
-            onDispatch={onDispatchAction}
-          />
-        )}
-
         {!realStreamVisible && (
           <LiveMicrophone
             stream={stream}
@@ -801,6 +854,68 @@ function LiveOperationsPanel({
         )}
       </div>
     </aside>
+  );
+}
+
+function LiveOperatorPrompt({ incident }: { incident: IncidentSnapshot }) {
+  const question = getOperatorQuestion(incident);
+
+  return (
+    <article className="rounded-md border border-[#7184c5]/25 bg-[#111827] p-3">
+      <div className="flex items-center gap-2">
+        <Users className="size-3.5 text-[#9eafea]" aria-hidden="true" />
+        <p className="text-[10px] font-semibold uppercase tracking-[0.1em] text-[#b8c4f1]">
+          Operator turn suggested
+        </p>
+      </div>
+      <p className="mt-2 text-[11px] leading-relaxed text-[#d4dcf6]">{question}</p>
+      <p className="mt-2 font-mono text-[9px] uppercase tracking-[0.08em] text-[#8390c3]">
+        Generated from the latest finalized turn · ask before dispatch
+      </p>
+    </article>
+  );
+}
+
+function getOperatorQuestion(incident: IncidentSnapshot) {
+  return incident.hazardType === 'flood'
+    ? 'Can you confirm the nearest landmark, whether anyone is trapped, and if the water is still rising?'
+    : incident.hazardType === 'landslide'
+      ? 'Can everyone stay clear of the slope, and is anyone isolated or injured right now?'
+      : 'Can you confirm how many people are exposed and whether there is an immediate electrical or structural danger?';
+}
+
+function OperatorTurnCard({
+  scenario,
+  onSpeak,
+}: {
+  scenario: Scenario;
+  onSpeak: (text: string) => void;
+}) {
+  return (
+    <article className="rounded-md border border-[#7184c5]/25 bg-[#111827] p-3">
+      <div className="flex items-center gap-2">
+        <Users className="size-3.5 text-[#9eafea]" aria-hidden="true" />
+        <p className="text-[10px] font-semibold uppercase tracking-[0.1em] text-[#b8c4f1]">
+          Operator follow-up
+        </p>
+        <span className="ml-auto font-mono text-[9px] text-[#8390c3]">TURN 02</span>
+      </div>
+      <p className="mt-2 text-[11px] leading-relaxed text-[#d4dcf6]">
+        {scenario.operatorPrompt}
+      </p>
+      <Button
+        size="sm"
+        variant="outline"
+        className="mt-3 border-[#7184c5]/25 bg-[#7184c5]/8 text-[#b8c4f1] hover:bg-[#7184c5]/14"
+        onClick={() => onSpeak(scenario.operatorPrompt)}
+      >
+        <Volume2 className="size-3.5" aria-hidden="true" />
+        Play operator prompt
+      </Button>
+      <p className="mt-2 font-mono text-[9px] uppercase tracking-[0.08em] text-[#8390c3]">
+        Prompt generated from the first report · awaiting field confirmation
+      </p>
+    </article>
   );
 }
 
@@ -882,6 +997,125 @@ function LiveTranscriptCard({
         </>
       )}
     </article>
+  );
+}
+
+type ReasoningEntry = {
+  label: string;
+  detail: string;
+  state: 'done' | 'active' | 'waiting';
+};
+
+function buildReasoningEntries({
+  stage,
+  liveIncident,
+  analysisState,
+  streamTurns,
+  summary,
+}: {
+  stage: StreamStage;
+  liveIncident: IncidentSnapshot | null;
+  analysisState: AnalysisState;
+  streamTurns: number;
+  summary: SummaryState;
+}): ReasoningEntry[] {
+  if (liveIncident || streamTurns > 0 || analysisState !== 'idle') {
+    return [
+      {
+        label: 'Turn finalized',
+        detail: streamTurns
+          ? `AssemblyAI finalized ${streamTurns} ${streamTurns === 1 ? 'speech turn' : 'speech turns'}.`
+          : 'Waiting for the first finalized AssemblyAI turn.',
+        state: streamTurns ? 'done' : 'active',
+      },
+      {
+        label: 'Extract incident facts',
+        detail: liveIncident
+          ? 'Hazard, place, measurement, access, and people-at-risk fields were extracted into the shared record.'
+          : 'The LLM Gateway is separating stated facts from unknowns.',
+        state: liveIncident ? 'done' : analysisState === 'analyzing' ? 'active' : 'waiting',
+      },
+      {
+        label: 'Check map context',
+        detail: liveIncident
+          ? `Matched the report to ${liveIncident.locationName}.`
+          : 'The map match will update when a location is identified.',
+        state: liveIncident ? 'done' : 'waiting',
+      },
+      {
+        label: 'Prepare response options',
+        detail: 'Actions are proposals only; an operator must authorize every dispatch.',
+        state: liveIncident ? 'done' : 'waiting',
+      },
+    ];
+  }
+
+  return [
+    {
+      label: 'Listen to public call',
+      detail: summary.locationKnown
+        ? 'Location and hazard language detected in the caller report.'
+        : 'Waiting for the caller to establish the location.',
+      state: summary.hazardKnown ? 'done' : stage === 'public' ? 'active' : 'waiting',
+    },
+    {
+      label: 'Ask a targeted follow-up',
+      detail: 'The operator prompt asks for the missing people-at-risk and immediate-safety facts.',
+      state: stage === 'field' || stage === 'complete' ? 'done' : 'waiting',
+    },
+    {
+      label: 'Verify with field radio',
+      detail: summary.metricKnown
+        ? 'Field measurement and access status are now source-linked.'
+        : 'Waiting for a field measurement and route status.',
+      state: summary.accessKnown ? 'done' : stage === 'field' ? 'active' : 'waiting',
+    },
+    {
+      label: 'Prepare response options',
+      detail: 'Recommendations remain proposals until the operator authorizes them.',
+      state: stage === 'complete' ? 'done' : 'waiting',
+    },
+  ];
+}
+
+function ReasoningTrail({ entries }: { entries: ReasoningEntry[] }) {
+  return (
+    <section className="rounded-md border border-[#8c78bf]/25 bg-[#13121b] p-3">
+      <div className="flex items-center gap-2">
+        <Sparkles className="size-4 text-[#b7a5e6]" aria-hidden="true" />
+        <h3 className="text-xs font-semibold">LLM reasoning</h3>
+        <Badge className="ml-auto bg-[#8c78bf]/15 font-mono text-[9px] text-[#c4b5ed]">
+          OPERATIONAL TRACE
+        </Badge>
+      </div>
+      <p className="mt-1 text-[10px] leading-relaxed text-[#897e9f]">
+        Concise, source-linked rationale for the command team — not hidden chain-of-thought.
+      </p>
+      <div className="mt-3 space-y-2">
+        {entries.map((entry) => (
+          <div key={entry.label} className="flex gap-2.5 rounded border border-white/7 bg-black/10 p-2.5">
+            <span
+              className={`mt-0.5 size-2 shrink-0 rounded-full ${
+                entry.state === 'done'
+                  ? 'bg-[#65c9a3]'
+                  : entry.state === 'active'
+                    ? 'animate-pulse bg-[#e0ad59]'
+                    : 'bg-[#667773]'
+              }`}
+              aria-hidden="true"
+            />
+            <div className="min-w-0">
+              <p className="font-mono text-[9px] uppercase tracking-[0.08em] text-[#a99cc5]">
+                {entry.label}
+              </p>
+              <p className="mt-1 text-[10px] leading-relaxed text-[#bdc4c1]">
+                {entry.detail}
+              </p>
+            </div>
+          </div>
+        ))}
+      </div>
+    </section>
   );
 }
 
@@ -1045,7 +1279,7 @@ function LiveMicrophone({
         />
         <h3 className="text-[11px] font-medium">Live multi-hazard intake</h3>
         <Badge className="ml-auto bg-white/6 font-mono text-[8px] text-[#788985]">
-          U3 PRO + LLM
+          ASSEMBLYAI LIVE · U3 PRO
         </Badge>
       </div>
       <p className="mt-2 text-[10px] leading-relaxed text-[#687975]">
