@@ -33,6 +33,85 @@ The sidebar contains two focused views backed by the same exercise state:
 - **Operations:** the complete command dashboard, including the incident map, independent call playback, live AssemblyAI transcripts, incident memory, operational analysis, briefings, and human-reviewed response proposals.
 - **Architecture:** a visual trace of the Gradium audio, AssemblyAI transcription, LLM Gateway analysis, geocoding, memory, mapping, briefing, and authorization pipeline.
 
+### Architecture
+
+```mermaid
+flowchart LR
+    subgraph Source[Prepared synthetic source]
+        Gradium[Gradium TTS<br/>reporter and operator voices]
+        WAV[16 kHz WAV call asset]
+        Gradium --> WAV
+    end
+
+    subgraph Runtime[Per-call runtime]
+        Clock[Playback clock]
+        PCM[16 kHz mono PCM16]
+        STT[AssemblyAI Universal-3 Pro<br/>real-time streaming STT]
+        Gateway[AssemblyAI LLM Gateway<br/>incident extraction and operational analysis]
+        Clock --> PCM --> STT
+        STT -->|finalized transcript turns| Gateway
+    end
+
+    WAV --> Clock
+
+    subgraph Evidence[Source-linked incident state]
+        Memory[AI live incident memory]
+        Trace[Operational analysis trace]
+        Geocoder[Location geocoder<br/>Nominatim, then Photon]
+        Map[MapLibre map<br/>OpenStreetMap data]
+        Gateway --> Memory
+        Gateway --> Trace
+        Gateway -->|new location evidence| Geocoder --> Map
+    end
+
+    subgraph Operator[Operations dashboard]
+        Transcript[Scrollable live transcript]
+        Briefing[Live command briefing]
+        Actions[Recommended actions<br/>human authorization required]
+        UI[Operations UI]
+        STT -->|partial and finalized text| Transcript
+        Memory --> UI
+        Trace --> UI
+        Map --> UI
+        Briefing --> UI
+        Actions --> UI
+    end
+
+    Gateway --> Briefing
+    Gateway --> Actions
+    UI -->|confirm simulated action| Audit[Local exercise record]
+```
+
+The browser receives short-lived AssemblyAI streaming tokens. Permanent AssemblyAI and Gradium keys stay server-side, while finalized transcript turns provide the evidence used to update memory, map state, briefings, and action proposals.
+
+### App flow
+
+```mermaid
+flowchart TD
+    Choose[Choose a hazard exercise<br/>Flood, storm, or landslide] --> Queue[Open the incoming-call queue]
+    Queue --> Select[Select one call or field channel]
+    Select --> Play[Play, pause, or resume<br/>from the saved position]
+    Play --> Stream[Stream only the audio already heard<br/>to AssemblyAI]
+    Stream --> Partial[Show partial live transcript]
+    Partial --> Final[Receive a finalized transcript turn]
+    Final --> Analyze[Send cumulative finalized speech<br/>to the LLM Gateway]
+    Analyze --> Update[Update source-linked memory<br/>and retain the operational trace]
+    Update --> Location{Did the model extract<br/>a usable location?}
+    Location -- Yes --> Geocode[Geocode inside the Vinh area]
+    Geocode --> Pin[Add or update the incident pin<br/>and map tooltip]
+    Location -- No --> Pin
+    Pin --> Brief[Refresh the command briefing<br/>and recommended actions]
+    Brief --> Confirm{Operator confirms<br/>a proposed action?}
+    Confirm -- No --> Wait[Keep the proposal pending<br/>while more calls continue]
+    Confirm -- Yes --> Record[Record a simulated dispatch<br/>without contacting real services]
+    Record --> Wait
+    Wait --> More{More calls or audio?}
+    More -- Yes --> Queue
+    More -- No --> Review[Review the final incident picture]
+```
+
+Multiple calls share the same dashboard but retain independent playback, transcript, memory, map evidence, and analysis history. The LLM analysis queue is serialized so one call cannot overwrite another call’s incident state.
+
 ## Response authorization
 
 AI recommendations are proposals only. Every simulated call or dispatch requires a separate operator confirmation dialog. Confirming an action records **Simulated dispatch sent** in local interface state; it does not call a phone number, send a message, or contact an agency.
