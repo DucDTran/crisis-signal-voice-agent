@@ -4,58 +4,51 @@ import type {
   GeoJSONSource,
   Map as MapLibreMap,
   Marker as MapLibreMarker,
+  Popup as MapLibrePopup,
 } from 'maplibre-gl';
 import { useEffect, useRef } from 'react';
 
-import {
-  hazardLabels,
-  type HazardType,
-  type LocationId,
-} from '@/lib/incidents';
+import { hazardLabels, type HazardType } from '@/lib/incidents';
 
-export type { LocationId } from '@/lib/incidents';
-
-type KnownLocationId = Exclude<LocationId, 'unknown'>;
 type MapStatus = 'idle' | 'reported' | 'verified';
+type Coordinates = [number, number];
+type MapLibreModule = typeof import('maplibre-gl');
+
+export type MapIncidentRecord = {
+  id: string;
+  source: string;
+  coordinates: Coordinates | null;
+  geocodedName: string | null;
+  hazardType: HazardType;
+  locationName: string;
+  summary: string;
+  severity: string;
+  confidence: string;
+  metricLabel: string;
+  metricValue: string;
+  access: string;
+  trend: string;
+  peopleAtRisk: string;
+  injuries: string;
+};
 
 type VinhMapProps = {
   status: MapStatus;
   hazardType: HazardType;
   metricLabel: string;
   metricValue: string | null;
-  selectedLocation: KnownLocationId;
-  incidentLocation: LocationId;
-  activeIncidentLocations: LocationId[];
+  incidentCoordinates: Coordinates | null;
+  incidentRecords: MapIncidentRecord[];
   evidenceMode: 'simulation' | 'live';
 };
 
-const locations = [
-  {
-    id: 'bridge' as const,
-    coordinates: [105.7082037, 18.6466265] as [number, number],
-    kind: 'incident',
-  },
-  {
-    id: 'station' as const,
-    coordinates: [105.6644204, 18.6877002] as [number, number],
-    kind: 'landmark',
-  },
-  {
-    id: 'market' as const,
-    coordinates: [105.6738416, 18.6630569] as [number, number],
-    kind: 'landmark',
-  },
-  {
-    id: 'university' as const,
-    coordinates: [105.6952531, 18.6609333] as [number, number],
-    kind: 'landmark',
-  },
-  {
-    id: 'mountain' as const,
-    coordinates: [105.6993583, 18.6467128] as [number, number],
-    kind: 'landmark',
-  },
-];
+type IncidentMarker = {
+  marker: MapLibreMarker;
+  popup: MapLibrePopup;
+  element: HTMLDivElement;
+};
+
+const VINH_CENTER: Coordinates = [105.6878, 18.6638];
 
 const hazardColors: Record<HazardType, string> = {
   flood: '#3b91aa',
@@ -68,11 +61,7 @@ const hazardColors: Record<HazardType, string> = {
   unknown: '#718e91',
 };
 
-function findLocation(id: LocationId) {
-  return locations.find((location) => location.id === id);
-}
-
-function circleExtent(center: [number, number], radius = 0.0024) {
+function circleExtent(center: Coordinates, radius = 0.0024) {
   const coordinates = Array.from({ length: 25 }, (_, index) => {
     const angle = (Math.PI * 2 * index) / 24;
     return [
@@ -87,33 +76,185 @@ function circleExtent(center: [number, number], radius = 0.0024) {
   };
 }
 
-function incidentExtent(hazardType: HazardType, locationId: LocationId) {
-  if (hazardType === 'flood' && locationId === 'bridge') {
-    return {
-      type: 'Feature' as const,
-      properties: {},
-      geometry: {
-        type: 'Polygon' as const,
-        coordinates: [
-          [
-            [105.7047, 18.6515],
-            [105.7074, 18.6518],
-            [105.7103, 18.6488],
-            [105.7101, 18.6458],
-            [105.7072, 18.6448],
-            [105.7048, 18.6474],
-            [105.7047, 18.6515],
-          ],
-        ],
-      },
-    };
+function incidentExtent(
+  hazardType: HazardType,
+  coordinates: Coordinates | null,
+) {
+  const radius = hazardType === 'tropical_storm' ? 0.0032 : 0.0022;
+  return circleExtent(coordinates ?? VINH_CENTER, radius);
+}
+
+function locationKey(record: MapIncidentRecord) {
+  return record.locationName.trim().toLocaleLowerCase('en-US');
+}
+
+function groupedGeocodedRecords(records: MapIncidentRecord[]) {
+  const grouped = new Map<string, MapIncidentRecord[]>();
+  for (const record of records) {
+    if (!record.coordinates) continue;
+    const key = locationKey(record);
+    if (!key) continue;
+    const current = grouped.get(key) ?? [];
+    current.push(record);
+    grouped.set(key, current);
+  }
+  return grouped;
+}
+
+function tooltipContent(records: MapIncidentRecord[]) {
+  const root = document.createElement('div');
+  root.className = 'incident-map-tooltip';
+  if (records.length === 0) return root;
+
+  const heading = document.createElement('strong');
+  heading.className = 'incident-map-tooltip-title';
+  heading.textContent = records[0].locationName;
+  root.appendChild(heading);
+
+  if (records[0].geocodedName) {
+    const address = document.createElement('span');
+    address.className = 'incident-map-tooltip-address';
+    address.textContent = records[0].geocodedName;
+    root.appendChild(address);
   }
 
-  const location = findLocation(locationId) ?? locations[0];
-  return circleExtent(
-    location.coordinates,
-    hazardType === 'tropical_storm' ? 0.0032 : 0.0022,
+  for (const record of records) {
+    const incident = document.createElement('section');
+    incident.className = 'incident-map-tooltip-record';
+    const meta = document.createElement('span');
+    meta.className = 'incident-map-tooltip-meta';
+    meta.textContent = `${hazardLabels[record.hazardType]} · ${record.severity} severity · ${record.confidence} confidence`;
+    const summary = document.createElement('p');
+    summary.textContent = record.summary;
+    const facts = document.createElement('dl');
+    for (const [label, value] of [
+      [record.metricLabel, record.metricValue],
+      ['Access / trend', `${record.access} / ${record.trend}`],
+      ['People at risk', record.peopleAtRisk],
+      ['Injuries', record.injuries],
+      ['Source', record.source],
+    ]) {
+      const term = document.createElement('dt');
+      term.textContent = label;
+      const description = document.createElement('dd');
+      description.textContent = value;
+      facts.appendChild(term);
+      facts.appendChild(description);
+    }
+    incident.appendChild(meta);
+    incident.appendChild(summary);
+    incident.appendChild(facts);
+    root.appendChild(incident);
+  }
+  return root;
+}
+
+function updateMarkerPresentation(
+  marker: IncidentMarker,
+  records: MapIncidentRecord[],
+  selectedCoordinates: Coordinates | null,
+) {
+  const coordinates = records[0].coordinates;
+  if (!coordinates) return;
+  marker.marker.setLngLat(coordinates);
+  marker.popup.setLngLat(coordinates).setDOMContent(tooltipContent(records));
+  marker.element.dataset.status = records.some(
+    (record) => record.confidence === 'high',
+  )
+    ? 'verified'
+    : 'reported';
+  marker.element.classList.toggle(
+    'is-selected',
+    Boolean(
+      selectedCoordinates &&
+      coordinates[0] === selectedCoordinates[0] &&
+      coordinates[1] === selectedCoordinates[1],
+    ),
   );
+  marker.element.setAttribute(
+    'aria-label',
+    `Show incident details for ${records[0].locationName}`,
+  );
+}
+
+function createIncidentMarker(
+  maplibregl: MapLibreModule,
+  map: MapLibreMap,
+  records: MapIncidentRecord[],
+  selectedCoordinates: Coordinates | null,
+) {
+  const coordinates = records[0].coordinates;
+  if (!coordinates) return null;
+
+  const element = document.createElement('div');
+  element.className = 'map-marker map-marker-incident';
+  element.tabIndex = 0;
+  element.setAttribute('role', 'button');
+  const core = document.createElement('span');
+  core.className = 'map-marker-core';
+  element.appendChild(core);
+
+  const popup = new maplibregl.Popup({
+    closeButton: false,
+    closeOnClick: false,
+    offset: 16,
+    maxWidth: '390px',
+  }).setDOMContent(tooltipContent(records));
+  const marker = new maplibregl.Marker({ element })
+    .setLngLat(coordinates)
+    .addTo(map);
+  let pinned = false;
+  const openPopup = () => popup.setLngLat(coordinates).addTo(map);
+  element.addEventListener('mouseenter', () => {
+    if (!popup.isOpen()) openPopup();
+  });
+  element.addEventListener('mouseleave', () => {
+    if (!pinned) popup.remove();
+  });
+  element.addEventListener('click', () => {
+    pinned = !pinned;
+    if (pinned) openPopup();
+    else popup.remove();
+  });
+  element.addEventListener('keydown', (event) => {
+    if (event.key !== 'Enter' && event.key !== ' ') return;
+    event.preventDefault();
+    element.click();
+  });
+
+  const incidentMarker = { marker, popup, element };
+  updateMarkerPresentation(incidentMarker, records, selectedCoordinates);
+  return incidentMarker;
+}
+
+function synchronizeIncidentMarkers(
+  maplibregl: MapLibreModule,
+  map: MapLibreMap,
+  markers: Map<string, IncidentMarker>,
+  records: MapIncidentRecord[],
+  selectedCoordinates: Coordinates | null,
+) {
+  const grouped = groupedGeocodedRecords(records);
+  for (const [key, marker] of markers) {
+    if (grouped.has(key)) continue;
+    marker.popup.remove();
+    marker.marker.remove();
+    markers.delete(key);
+  }
+  for (const [key, locationRecords] of grouped) {
+    const current = markers.get(key);
+    if (current) {
+      updateMarkerPresentation(current, locationRecords, selectedCoordinates);
+      continue;
+    }
+    const marker = createIncidentMarker(
+      maplibregl,
+      map,
+      locationRecords,
+      selectedCoordinates,
+    );
+    if (marker) markers.set(key, marker);
+  }
 }
 
 export function VinhMap({
@@ -121,56 +262,52 @@ export function VinhMap({
   hazardType,
   metricLabel,
   metricValue,
-  selectedLocation,
-  incidentLocation,
-  activeIncidentLocations,
+  incidentCoordinates,
+  incidentRecords,
   evidenceMode,
 }: VinhMapProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const mapRef = useRef<MapLibreMap | null>(null);
-  const markerRefs = useRef<Map<KnownLocationId, MapLibreMarker>>(new Map());
+  const maplibreRef = useRef<MapLibreModule | null>(null);
+  const markerRefs = useRef<Map<string, IncidentMarker>>(new Map());
   const incidentLabelRef = useRef<HTMLDivElement | null>(null);
   const incidentLabelMarkerRef = useRef<MapLibreMarker | null>(null);
-  const selectedRef = useRef(selectedLocation);
   const statusRef = useRef(status);
   const hazardRef = useRef(hazardType);
-  const incidentLocationRef = useRef(incidentLocation);
+  const incidentCoordinatesRef = useRef(incidentCoordinates);
   const metricLabelRef = useRef(metricLabel);
   const metricValueRef = useRef(metricValue);
   const evidenceModeRef = useRef(evidenceMode);
-  const activeIncidentLocationsRef = useRef(activeIncidentLocations);
+  const incidentRecordsRef = useRef(incidentRecords);
 
   useEffect(() => {
-    selectedRef.current = selectedLocation;
     statusRef.current = status;
     hazardRef.current = hazardType;
-    incidentLocationRef.current = incidentLocation;
+    incidentCoordinatesRef.current = incidentCoordinates;
     metricLabelRef.current = metricLabel;
     metricValueRef.current = metricValue;
     evidenceModeRef.current = evidenceMode;
-    activeIncidentLocationsRef.current = activeIncidentLocations;
+    incidentRecordsRef.current = incidentRecords;
   }, [
     evidenceMode,
     hazardType,
-    incidentLocation,
+    incidentCoordinates,
+    incidentRecords,
     metricLabel,
     metricValue,
-    selectedLocation,
     status,
-    activeIncidentLocations,
   ]);
 
   useEffect(() => {
     const container = containerRef.current;
     if (!container || mapRef.current) return;
-
     let cancelled = false;
     let resizeObserver: ResizeObserver | null = null;
     const markers = markerRefs.current;
 
     void import('maplibre-gl').then((maplibregl) => {
       if (cancelled || !containerRef.current) return;
-
+      maplibregl.setWorkerUrl('/maplibre-gl-worker.mjs');
       const map = new maplibregl.Map({
         container,
         style: {
@@ -197,13 +334,12 @@ export function VinhMap({
             },
           ],
         },
-        center: [105.6878, 18.6638],
-        zoom: 13,
+        center: incidentCoordinatesRef.current ?? VINH_CENTER,
+        zoom: incidentCoordinatesRef.current ? 14.3 : 13,
         minZoom: 10.5,
         maxZoom: 17,
         attributionControl: false,
       });
-
       map.addControl(
         new maplibregl.NavigationControl({ showCompass: false }),
         'top-left',
@@ -212,19 +348,23 @@ export function VinhMap({
         new maplibregl.AttributionControl({ compact: true }),
         'bottom-right',
       );
-
       map.on('load', () => {
         map.addSource('incident-extent', {
           type: 'geojson',
-          data: incidentExtent(hazardRef.current, incidentLocationRef.current),
+          data: incidentExtent(
+            hazardRef.current,
+            incidentCoordinatesRef.current,
+          ),
         });
+        const visibility =
+          statusRef.current === 'idle' || !incidentCoordinatesRef.current
+            ? 'none'
+            : 'visible';
         map.addLayer({
           id: 'incident-extent-fill',
           type: 'fill',
           source: 'incident-extent',
-          layout: {
-            visibility: statusRef.current === 'idle' ? 'none' : 'visible',
-          },
+          layout: { visibility },
           paint: {
             'fill-color': hazardColors[hazardRef.current],
             'fill-opacity': statusRef.current === 'verified' ? 0.46 : 0.25,
@@ -234,9 +374,7 @@ export function VinhMap({
           id: 'incident-extent-outline',
           type: 'line',
           source: 'incident-extent',
-          layout: {
-            visibility: statusRef.current === 'idle' ? 'none' : 'visible',
-          },
+          layout: { visibility },
           paint: {
             'line-color': hazardColors[hazardRef.current],
             'line-width': 2.5,
@@ -245,28 +383,6 @@ export function VinhMap({
           },
         });
       });
-
-      for (const location of locations) {
-        const markerElement = document.createElement('div');
-        markerElement.className = `map-marker map-marker-${location.kind}`;
-        markerElement.dataset.location = location.id;
-        markerElement.classList.toggle(
-          'is-selected',
-          location.id === selectedRef.current,
-        );
-        if (activeIncidentLocationsRef.current.includes(location.id)) {
-          markerElement.dataset.status = statusRef.current;
-        }
-        markerElement.setAttribute('aria-hidden', 'true');
-        const core = document.createElement('span');
-        core.className = 'map-marker-core';
-        markerElement.appendChild(core);
-
-        const mapMarker = new maplibregl.Marker({ element: markerElement })
-          .setLngLat(location.coordinates)
-          .addTo(map);
-        markers.set(location.id, mapMarker);
-      }
 
       const incidentLabel = document.createElement('div');
       incidentLabel.className = 'water-level-label';
@@ -281,45 +397,60 @@ export function VinhMap({
       incidentLabel.appendChild(label);
       incidentLabel.appendChild(value);
       incidentLabel.appendChild(source);
-      incidentLabel.hidden = statusRef.current === 'idle';
+      incidentLabel.hidden =
+        statusRef.current === 'idle' || !incidentCoordinatesRef.current;
       incidentLabelRef.current = incidentLabel;
-
-      const labelLocation =
-        findLocation(incidentLocationRef.current) ?? locations[0];
       incidentLabelMarkerRef.current = new maplibregl.Marker({
         element: incidentLabel,
         anchor: 'bottom-left',
       })
-        .setLngLat(labelLocation.coordinates)
+        .setLngLat(incidentCoordinatesRef.current ?? VINH_CENTER)
         .addTo(map);
 
+      mapRef.current = map;
+      maplibreRef.current = maplibregl;
+      synchronizeIncidentMarkers(
+        maplibregl,
+        map,
+        markers,
+        incidentRecordsRef.current,
+        incidentCoordinatesRef.current,
+      );
       resizeObserver = new ResizeObserver(() => map.resize());
       resizeObserver.observe(container);
-      mapRef.current = map;
     });
 
     return () => {
       cancelled = true;
       resizeObserver?.disconnect();
+      for (const marker of markers.values()) {
+        marker.popup.remove();
+        marker.marker.remove();
+      }
       markers.clear();
       incidentLabelRef.current = null;
       incidentLabelMarkerRef.current = null;
       mapRef.current?.remove();
       mapRef.current = null;
+      maplibreRef.current = null;
     };
   }, []);
 
   useEffect(() => {
-    for (const [id, marker] of markerRefs.current) {
-      const element = marker.getElement();
-      element.classList.toggle('is-selected', id === selectedLocation);
-      if (activeIncidentLocations.includes(id)) element.dataset.status = status;
-      else delete element.dataset.status;
-    }
+    const map = mapRef.current;
+    const maplibregl = maplibreRef.current;
+    if (!map || !maplibregl) return;
+    synchronizeIncidentMarkers(
+      maplibregl,
+      map,
+      markerRefs.current,
+      incidentRecords,
+      incidentCoordinates,
+    );
 
     const label = incidentLabelRef.current;
     if (label) {
-      label.hidden = status === 'idle';
+      label.hidden = status === 'idle' || !incidentCoordinates;
       const name = label.querySelector('span');
       const value = label.querySelector('strong');
       const source = label.querySelector('small');
@@ -331,19 +462,17 @@ export function VinhMap({
       }
       label.dataset.status = status;
     }
-
-    const incidentTarget = findLocation(incidentLocation);
-    if (incidentTarget) {
-      incidentLabelMarkerRef.current?.setLngLat(incidentTarget.coordinates);
+    if (incidentCoordinates) {
+      incidentLabelMarkerRef.current?.setLngLat(incidentCoordinates);
     }
 
-    const map = mapRef.current;
-    const source = map?.getSource('incident-extent') as
+    const source = map.getSource('incident-extent') as
       | GeoJSONSource
       | undefined;
-    void source?.setData(incidentExtent(hazardType, incidentLocation));
-    if (map?.getLayer('incident-extent-fill')) {
-      const visibility = status === 'idle' ? 'none' : 'visible';
+    void source?.setData(incidentExtent(hazardType, incidentCoordinates));
+    if (map.getLayer('incident-extent-fill')) {
+      const visibility =
+        status === 'idle' || !incidentCoordinates ? 'none' : 'visible';
       map.setLayoutProperty('incident-extent-fill', 'visibility', visibility);
       map.setLayoutProperty(
         'incident-extent-outline',
@@ -366,28 +495,21 @@ export function VinhMap({
         status === 'verified' ? 0.46 : 0.25,
       );
     }
-
-    const selectedTarget = findLocation(selectedLocation);
-    if (selectedTarget && map) {
-      map.easeTo({
-        center: selectedTarget.coordinates,
-        zoom: selectedLocation === 'bridge' ? 14.3 : 14,
-        duration: 600,
-      });
+    if (incidentCoordinates) {
+      map.easeTo({ center: incidentCoordinates, zoom: 14.3, duration: 600 });
     }
   }, [
     evidenceMode,
-    activeIncidentLocations,
     hazardType,
-    incidentLocation,
+    incidentCoordinates,
+    incidentRecords,
     metricLabel,
     metricValue,
-    selectedLocation,
     status,
   ]);
 
   return (
-    <div className="relative h-[430px] overflow-hidden bg-[#10171a]">
+    <div className="relative h-full min-h-[430px] overflow-hidden bg-[#10171a]">
       <div
         ref={containerRef}
         className="absolute inset-0"
@@ -395,7 +517,7 @@ export function VinhMap({
       />
       <div className="map-vignette pointer-events-none absolute inset-0" />
       <div className="pointer-events-none absolute left-4 top-4 rounded-md border border-white/10 bg-[#11181b]/92 px-3 py-2 shadow-xl">
-        <p className="font-mono text-[10px] font-semibold uppercase tracking-[0.14em] text-[#d79b39]">
+        <p className="text-[10px] font-semibold uppercase tracking-[0.14em] text-[#d79b39]">
           Multi-hazard exercise map
         </p>
         <p className="mt-0.5 text-xs text-[#d9e1df]">

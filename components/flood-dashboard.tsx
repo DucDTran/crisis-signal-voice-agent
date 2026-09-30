@@ -4,24 +4,19 @@ import {
   Activity,
   AlertTriangle,
   AudioLines,
-  Bell,
-  Check,
-  Clock3,
+  CheckCircle2,
+  ChevronRight,
   Database,
   Headphones,
   Layers3,
   LoaderCircle,
-  Map,
-  Mic,
+  MapPin,
   Pause,
   Play,
-  Radio,
   RefreshCw,
-  Route,
-  Settings,
+  Send,
   ShieldCheck,
   Sparkles,
-  Users,
   Volume2,
   Waves,
 } from 'lucide-react';
@@ -37,1551 +32,1611 @@ import {
   SelectTrigger,
   SelectValue,
 } from '@/components/ui/select';
+import { VinhMap, type MapIncidentRecord } from '@/components/vinh-map';
 import {
-  Tooltip,
-  TooltipContent,
-  TooltipProvider,
-  TooltipTrigger,
-} from '@/components/ui/tooltip';
-import { VinhMap } from '@/components/vinh-map';
-import { useAssemblyAIStream } from '@/hooks/use-assemblyai-stream';
+  useAssemblyAIStream,
+  type TranscriptTurn,
+} from '@/hooks/use-assemblyai-stream';
+import { useGradiumTts } from '@/hooks/use-gradium-tts';
 import {
-  actionCatalog,
   hazardLabels,
-  isIncidentSnapshot,
+  isIncidentAnalysis,
   scenarios,
   type ActionId,
   type IncidentSnapshot,
-  type LocationId,
-  type Scenario,
+  type ReasoningEvent,
   type ScenarioCall,
   type ScenarioId,
-  type ScenarioReport,
 } from '@/lib/incidents';
 
-type StreamStage = 'ready' | 'public' | 'field' | 'complete';
-type ReportId = 'public' | 'field';
-type KnownLocationId = Exclude<LocationId, 'unknown'>;
+type CallStatus =
+  | 'queued'
+  | 'generating'
+  | 'connecting'
+  | 'playing'
+  | 'paused'
+  | 'analyzing'
+  | 'processed'
+  | 'error';
 type AnalysisState = 'idle' | 'analyzing' | 'ready' | 'error';
 type ActionStatuses = Partial<Record<ActionId, 'dispatched'>>;
-type CallStatus = 'queued' | 'listening' | 'analyzing' | 'processed';
+type WorkspaceView = 'operations' | 'architecture';
 
-const landmarks: Record<KnownLocationId, { name: string; meta: string }> = {
-  bridge: {
-    name: 'Ben Thuy Bridge 1',
-    meta: 'Northern approach, Vinh side',
-  },
-  station: {
-    name: 'Vinh Railway Station',
-    meta: 'Transport hub',
-  },
-  market: {
-    name: 'Vinh Market',
-    meta: 'Community and trading district',
-  },
-  university: {
-    name: 'Vinh University',
-    meta: 'Relief staging destination',
-  },
-  mountain: {
-    name: 'Nui Quyet',
-    meta: 'Mountain access road',
-  },
+type ReasoningTrace = ReasoningEvent & {
+  id: string;
+  createdAt: number;
+  transcriptTurnCount: number;
+};
+
+type CallSession = {
+  status: CallStatus;
+  transcriptTurns: TranscriptTurn[];
+  partialTranscript: string;
+  currentTime: number;
+  duration: number;
+  error: string;
+};
+
+type IncidentMemory = {
+  callId: string;
+  callLabel: string;
+  updatedAt: number;
+  incident: IncidentSnapshot;
+  coordinates: [number, number] | null;
+  geocodedName: string | null;
+};
+
+type GeocodeResponse = {
+  available?: boolean;
+  coordinates?: [number, number];
+  displayName?: string;
+};
+
+const EMPTY_SESSION: CallSession = {
+  status: 'queued',
+  transcriptTurns: [],
+  partialTranscript: '',
+  currentTime: 0,
+  duration: 0,
+  error: '',
+};
+
+const EMPTY_INCIDENT: IncidentSnapshot = {
+  hazardType: 'unknown',
+  locationId: 'unknown',
+  locationName: 'Location not established',
+  summary: 'No incident evidence has been extracted yet.',
+  severity: 'unknown',
+  confidence: 'low',
+  metricLabel: 'Field measurement',
+  metricValue: 'Unknown',
+  access: 'unknown',
+  trend: 'Unknown',
+  peopleAtRisk: 'Unknown',
+  injuries: 'Unknown',
+  recommendedActionIds: [],
 };
 
 const navItems = [
-  { label: 'Operations', icon: Activity, active: true },
-  { label: 'Incident map', icon: Map },
-  { label: 'Voice streams', icon: AudioLines },
-  { label: 'Response teams', icon: Users },
-  { label: 'Data sources', icon: Database },
-];
+  { id: 'operations', label: 'Operations', icon: Activity },
+  { id: 'architecture', label: 'Architecture', icon: Layers3 },
+] satisfies Array<{
+  id: WorkspaceView;
+  label: string;
+  icon: typeof Activity;
+}>;
+
+function preGeneratedAudioUrl(callId: string) {
+  return `/audio/vinh/generated/${callId}.wav`;
+}
+
+function genericCallLabel(call: ScenarioCall, index: number) {
+  const fieldChannel = call.source.toLowerCase().includes('field');
+  return `${fieldChannel ? 'Field channel' : 'Incoming call'} ${String(index + 1).padStart(2, '0')}`;
+}
 
 export function FloodDashboard() {
+  const [activeView, setActiveView] = useState<WorkspaceView>('operations');
   const [scenarioId, setScenarioId] = useState<ScenarioId>('flood');
-  const [stage, setStage] = useState<StreamStage>('ready');
-  const [revealedWords, setRevealedWords] = useState(0);
-  const [selectedLocation, setSelectedLocation] =
-    useState<KnownLocationId>('bridge');
-  const [briefingVisible, setBriefingVisible] = useState(false);
-  const [liveIncident, setLiveIncident] = useState<IncidentSnapshot | null>(
-    null,
-  );
-  const [analysisState, setAnalysisState] = useState<AnalysisState>('idle');
-  const [analysisError, setAnalysisError] = useState('');
-  const [actionStatuses, setActionStatuses] = useState<ActionStatuses>({});
   const [selectedCallId, setSelectedCallId] = useState('flood-call-01');
-  const [callStatuses, setCallStatuses] = useState<Record<string, CallStatus>>({});
-  const [fixtureMode, setFixtureMode] = useState(false);
-  const stageRef = useRef<StreamStage>('ready');
-  const speechBoundarySeen = useRef<Record<ReportId, boolean>>({
-    public: false,
-    field: false,
-  });
-  const fallbackTimers = useRef<Partial<Record<ReportId, number>>>({});
+  const [sessions, setSessions] = useState<Record<string, CallSession>>({});
+  const [incidentMemories, setIncidentMemories] = useState<
+    Record<string, IncidentMemory>
+  >({});
+  const [reasoningByCall, setReasoningByCall] = useState<
+    Record<string, ReasoningTrace[]>
+  >({});
+  const [analysisByCall, setAnalysisByCall] = useState<
+    Record<string, AnalysisState>
+  >({});
+  const [analysisErrors, setAnalysisErrors] = useState<Record<string, string>>(
+    {},
+  );
+  const [actionStatuses, setActionStatuses] = useState<ActionStatuses>({});
+  const generatedAudioUrls = useRef<Record<string, string>>({});
+  const lastAnalyzedTurnCount = useRef<Record<string, number>>({});
+  const lastAnalysisStartedAt = useRef<Record<string, number>>({});
+  const lastGeocodeLocation = useRef<Record<string, string>>({});
   const stream = useAssemblyAIStream();
-  const startFixture = stream.startFixture;
+  const gradiumTts = useGradiumTts();
 
   const scenario = scenarios[scenarioId];
   const calls = scenario.calls;
-  const selectedCall = calls.find((call) => call.id === selectedCallId) ?? calls[0];
-  const publicReport = scenario.publicReport;
-  const fieldReport = scenario.fieldReport;
-  const activeReport =
-    stage === 'public' ? publicReport : stage === 'field' ? fieldReport : null;
-  const activeWords = useMemo(
-    () => activeReport?.text.split(' ') ?? [],
-    [activeReport],
+  const selectedCall =
+    calls.find((call) => call.id === selectedCallId) ?? calls[0];
+  const selectedSession = selectedCall
+    ? (sessions[selectedCall.id] ?? EMPTY_SESSION)
+    : EMPTY_SESSION;
+  const selectedMemory = selectedCall
+    ? incidentMemories[selectedCall.id]
+    : undefined;
+  const selectedReasoning = selectedCall
+    ? (reasoningByCall[selectedCall.id] ?? [])
+    : [];
+  const selectedAnalysisState = selectedCall
+    ? (analysisByCall[selectedCall.id] ?? 'idle')
+    : 'idle';
+  const selectedAnalysisError = selectedCall
+    ? (analysisErrors[selectedCall.id] ?? '')
+    : '';
+
+  const memoryList = useMemo(
+    () =>
+      Object.values(incidentMemories).sort(
+        (left, right) => right.updatedAt - left.updatedAt,
+      ),
+    [incidentMemories],
   );
-  const progress = activeWords.length
-    ? Math.min(1, revealedWords / activeWords.length)
-    : stage === 'complete'
-      ? 1
-      : 0;
-
-  const publicComplete = stage === 'field' || stage === 'complete';
-  const fieldSeen = stage === 'field' || stage === 'complete';
-  const fieldComplete = stage === 'complete';
-  const fieldProgress = stage === 'field' ? progress : fieldComplete ? 1 : 0;
-  const publicProgress = stage === 'public' ? progress : publicComplete ? 1 : 0;
-
-  const locationKnown = publicProgress >= 0.26 || fieldSeen;
-  const hazardKnown = publicProgress >= 0.44 || fieldSeen;
-  const trendKnown = publicProgress >= 0.74 || fieldSeen;
-  const metricKnown = fieldProgress >= 0.48;
-  const accessKnown = fieldProgress >= 0.68;
-  const peopleKnown = fieldProgress >= 0.82;
-
-  const liveMode =
-    stream.state === 'connecting' ||
-    stream.state === 'listening' ||
-    stream.finalTurns.length > 0 ||
-    Boolean(liveIncident);
-  const displayedIncident = liveIncident ?? scenario.incident;
-  const incidentLocation =
-    liveIncident?.locationId ?? scenario.incident.locationId;
-  const mapStatus = liveIncident
-    ? liveIncident.confidence === 'high'
+  const displayedIncident = selectedMemory?.incident ?? EMPTY_INCIDENT;
+  const mapIncidentRecords = useMemo<MapIncidentRecord[]>(
+    () =>
+      memoryList.map((memory) => ({
+        id: memory.callId,
+        source: memory.callLabel,
+        coordinates: memory.coordinates,
+        geocodedName: memory.geocodedName,
+        ...memory.incident,
+      })),
+    [memoryList],
+  );
+  const mapStatus = selectedMemory
+    ? selectedMemory.incident.confidence === 'high'
       ? 'verified'
       : 'reported'
-    : metricKnown
-      ? 'verified'
-      : hazardKnown
-        ? 'reported'
-        : 'idle';
-  const metricValue = liveIncident
-    ? liveIncident.metricValue === 'Unknown'
-      ? null
-      : liveIncident.metricValue
-    : metricKnown
-      ? scenario.incident.metricValue
-      : hazardKnown
-        ? 'Awaiting field report'
-        : null;
-  const selected = landmarks[selectedLocation];
-  const selectedIsIncident = selectedLocation === incidentLocation;
-  const activeIncidentLocations = calls
-    .filter((call) => callStatuses[call.id] && callStatuses[call.id] !== 'queued')
-    .map((call) => call.locationId);
-  const actionsIncident =
-    liveIncident ?? (stage === 'complete' ? scenario.incident : null);
-  const reasoningEntries = buildReasoningEntries({
-    stage,
-    liveIncident,
-    analysisState,
-    streamTurns: stream.finalTurns.length,
-    summary: { locationKnown, hazardKnown, trendKnown, metricKnown, accessKnown, peopleKnown },
-    callCount: calls.length,
-    processedCallCount: Object.values(callStatuses).filter((status) => status === 'processed').length,
-    activeCallTitle: selectedCall?.title ?? 'Incoming call',
-  });
+    : 'idle';
 
-  useEffect(() => {
-    const timer = window.setTimeout(() => {
-      if (stage === 'public' && calls[0]) {
-        setSelectedCallId(calls[0].id);
-        setCallStatuses((current) => ({ ...current, [calls[0].id]: 'listening' }));
-      }
-      if (stage === 'field' && calls[1]) {
-        setSelectedCallId(calls[1].id);
-        setCallStatuses((current) => ({
-          ...current,
-          [calls[0]?.id ?? '']: 'processed',
-          [calls[1].id]: 'listening',
-        }));
-      }
-      if (stage === 'complete') {
-        setCallStatuses((current) => ({
-          ...current,
-          [calls[0]?.id ?? '']: 'processed',
-          [calls[1]?.id ?? '']: 'processed',
-        }));
-      }
-    }, 0);
-    return () => window.clearTimeout(timer);
-  }, [calls, stage]);
-
-  useEffect(() => {
-    if (stage !== 'complete' || calls.length < 3) return;
-    const timers: number[] = [];
-    const extraCalls = calls.slice(2);
-    extraCalls.forEach((call, index) => {
-      const startDelay = index * 8500;
-      const startTimer = window.setTimeout(() => {
-        setSelectedCallId(call.id);
-        setCallStatuses((current) => ({ ...current, [call.id]: 'listening' }));
-        if (call.audioUrl) {
-          void startFixture(call.audioUrl).catch(() => {
-            setCallStatuses((current) => ({ ...current, [call.id]: 'processed' }));
-          });
-        } else if ('speechSynthesis' in window) {
-          const utterance = new SpeechSynthesisUtterance(
-            call.turns.map((turn) => `${turn.speaker}: ${turn.text}`).join(' '),
-          );
-          utterance.lang = 'en-US';
-          utterance.rate = 0.96;
-          utterance.onstart = () => {
-            setCallStatuses((current) => ({ ...current, [call.id]: 'analyzing' }));
-          };
-          utterance.onend = () => {
-            setCallStatuses((current) => ({ ...current, [call.id]: 'processed' }));
-          };
-          utterance.onerror = () => {
-            setCallStatuses((current) => ({ ...current, [call.id]: 'processed' }));
-          };
-          window.speechSynthesis.speak(utterance);
-        } else {
-          setCallStatuses((current) => ({ ...current, [call.id]: 'processed' }));
-        }
-      }, startDelay);
-      timers.push(startTimer);
-    });
-    return () => timers.forEach((timer) => window.clearTimeout(timer));
-  }, [calls, stage, startFixture]);
-
-  const speakSimulationReport = useCallback((report: ScenarioReport) => {
-    const totalWords = report.text.split(/\s+/).filter(Boolean).length;
-    speechBoundarySeen.current[report.id] = false;
-    if (!('speechSynthesis' in window)) {
-      if (stageRef.current === report.id) setRevealedWords(totalWords);
-      return;
-    }
-
-    const clearFallback = () => {
-      const timer = fallbackTimers.current[report.id];
-      if (timer) window.clearInterval(timer);
-      delete fallbackTimers.current[report.id];
-    };
-    const utterance = new SpeechSynthesisUtterance(report.text);
-    utterance.lang = 'en-US';
-    utterance.rate = report.id === 'public' ? 0.96 : 0.98;
-    utterance.onstart = () => {
-      const startedAt = Date.now();
-      clearFallback();
-      fallbackTimers.current[report.id] = window.setInterval(() => {
-        if (speechBoundarySeen.current[report.id]) return;
-        if (stageRef.current !== report.id) return;
-        const elapsedWords = Math.floor((Date.now() - startedAt) / 220);
-        setRevealedWords((current) => Math.min(totalWords, Math.max(current, elapsedWords)));
-      }, 100);
-    };
-    utterance.onboundary = (event) => {
-      speechBoundarySeen.current[report.id] = true;
-      if (stageRef.current !== report.id) return;
-      const spoken = report.text.slice(0, event.charIndex).trim();
-      const words = spoken ? spoken.split(/\s+/).length : 0;
-      setRevealedWords((current) => Math.min(totalWords, Math.max(current, words)));
-    };
-    utterance.onend = () => {
-      clearFallback();
-      if (stageRef.current === report.id) setRevealedWords(totalWords);
-    };
-    utterance.onerror = () => {
-      clearFallback();
-      if (stageRef.current === report.id) setRevealedWords(totalWords);
-    };
-    window.speechSynthesis.speak(utterance);
+  const selectCall = useCallback((call: ScenarioCall) => {
+    setSelectedCallId(call.id);
   }, []);
 
-  useEffect(() => {
-    stageRef.current = stage;
-  }, [stage]);
-
-  useEffect(() => {
-    if (!activeReport || revealedWords < activeWords.length) return;
-    const delay = window.setTimeout(() => {
-      if (stage === 'public') {
-        stageRef.current = 'field';
-        setStage('field');
-        setRevealedWords(0);
-        speakSimulationReport(fieldReport);
-      } else if (stage === 'field') {
-        stageRef.current = 'complete';
-        setStage('complete');
-        setBriefingVisible(true);
-      }
-    }, 700);
-    return () => window.clearTimeout(delay);
-  }, [activeReport, activeWords.length, fieldReport, revealedWords, speakSimulationReport, stage]);
-
-  useEffect(() => {
-    const transcript = stream.finalTurns.join(' ').trim();
-    if (!transcript) return;
-
-    const controller = new AbortController();
-    queueMicrotask(() => {
-      if (!controller.signal.aborted) {
-        setAnalysisState('analyzing');
-        setAnalysisError('');
-      }
-    });
-
-    void fetch('/api/analyze-incident', {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ transcript }),
-      signal: controller.signal,
-    })
-      .then(async (response) => {
-        const body = (await response.json()) as {
-          incident?: unknown;
-          error?: string;
-        };
-        if (!response.ok || !isIncidentSnapshot(body.incident)) {
-          throw new Error(body.error ?? 'Live incident analysis failed.');
-        }
-        setLiveIncident(body.incident);
-        setAnalysisState('ready');
-        setBriefingVisible(true);
-        if (body.incident.locationId !== 'unknown') {
-          setSelectedLocation(body.incident.locationId);
-        }
-      })
-      .catch((error: unknown) => {
-        if (error instanceof Error && error.name === 'AbortError') return;
-        setAnalysisError(
-          error instanceof Error ? error.message : 'Live analysis failed.',
-        );
-        setAnalysisState('error');
-      });
-
-    return () => controller.abort();
-  }, [stream.finalTurns]);
-
-  useEffect(() => {
-    if (!fixtureMode || stream.finalTurns.length === 0) return;
-    const nextAudioUrl = calls[1]?.audioUrl;
-    if (stage === 'public' && nextAudioUrl) {
-      const timer = window.setTimeout(() => {
-        stageRef.current = 'field';
-        setStage('field');
-        setRevealedWords(0);
-        setSelectedCallId(calls[1].id);
-        void startFixture(nextAudioUrl);
-      }, 0);
-      return () => window.clearTimeout(timer);
-    } else if (stage === 'field') {
-      const timer = window.setTimeout(() => {
-        stageRef.current = 'complete';
-        setStage('complete');
-        setBriefingVisible(true);
-      }, 0);
-      return () => window.clearTimeout(timer);
-    }
-  }, [calls, fixtureMode, stage, startFixture, stream.finalTurns]);
-
-  useEffect(() => {
-    return () => window.speechSynthesis?.cancel();
-  }, []);
-
-  function startSimulation() {
-    stream.reset();
-    setLiveIncident(null);
-    setAnalysisState('idle');
-    setAnalysisError('');
-    setActionStatuses({});
-    setCallStatuses(Object.fromEntries(calls.map((call) => [call.id, 'queued'])));
-    setSelectedCallId(calls[0]?.id ?? '');
-    setFixtureMode(true);
-    stageRef.current = 'public';
-    setStage('public');
-    setRevealedWords(0);
-    setSelectedLocation(scenario.incident.locationId as KnownLocationId);
-    setBriefingVisible(false);
-    if (calls[0]?.audioUrl) {
-      void startFixture(calls[0].audioUrl);
-    } else {
-      speakSimulationReport(publicReport);
-    }
-  }
-
-  function resetSimulation() {
-    window.speechSynthesis?.cancel();
-    stageRef.current = 'ready';
-    stream.reset();
-    setStage('ready');
-    setRevealedWords(0);
-    setSelectedLocation(scenario.incident.locationId as KnownLocationId);
-    setBriefingVisible(false);
-    setLiveIncident(null);
-    setAnalysisState('idle');
-    setAnalysisError('');
-    setActionStatuses({});
-    setCallStatuses({});
-    setSelectedCallId(calls[0]?.id ?? '');
-    setFixtureMode(false);
-  }
-
-  function changeScenario(value: ScenarioId | null) {
-    if (!value) return;
-    window.speechSynthesis?.cancel();
-    stageRef.current = 'ready';
-    stream.reset();
-    const nextScenario = scenarios[value];
-    setScenarioId(value);
-    setStage('ready');
-    setRevealedWords(0);
-    setSelectedLocation(nextScenario.incident.locationId as KnownLocationId);
-    setBriefingVisible(false);
-    setLiveIncident(null);
-    setAnalysisState('idle');
-    setAnalysisError('');
-    setActionStatuses({});
-    setCallStatuses(Object.fromEntries(nextScenario.calls.map((call) => [call.id, 'queued'])));
-    setSelectedCallId(nextScenario.calls[0]?.id ?? '');
-    setFixtureMode(false);
-  }
-
-  async function startLiveIncident() {
-    window.speechSynthesis?.cancel();
-    stageRef.current = 'ready';
-    setStage('ready');
-    setRevealedWords(0);
-    setBriefingVisible(false);
-    setLiveIncident(null);
-    setAnalysisState('idle');
-    setAnalysisError('');
-    setActionStatuses({});
-    setCallStatuses(Object.fromEntries(calls.map((call) => [call.id, 'queued'])));
-    setSelectedCallId(calls[0]?.id ?? '');
-    setFixtureMode(false);
-    await stream.start();
-  }
-
-  function speakBriefing() {
-    setBriefingVisible(true);
-    if (!('speechSynthesis' in window)) return;
-    window.speechSynthesis.cancel();
-    const actionText = displayedIncident.recommendedActionIds
-      .map((id) => actionCatalog[id].title)
-      .join(', ');
-    const text = liveIncident
-      ? `${liveIncident.summary} Recommended actions for operator review: ${actionText}.`
-      : scenario.briefing;
-    const utterance = new SpeechSynthesisUtterance(text);
-    utterance.lang = 'en-US';
-    utterance.rate = 0.94;
-    window.speechSynthesis.speak(utterance);
-  }
-
-  function speakOperatorPrompt(text: string) {
-    if (!('speechSynthesis' in window)) return;
-    window.speechSynthesis.cancel();
-    const utterance = new SpeechSynthesisUtterance(text.replace(/^Operator:\s*/i, ''));
-    utterance.lang = 'en-US';
-    utterance.rate = 0.98;
-    window.speechSynthesis.speak(utterance);
-  }
-
-  function dispatchAction(actionId: ActionId) {
-    setActionStatuses((current) => ({
+  const persistActiveStream = useCallback(() => {
+    const callId = stream.activeCallId;
+    if (!callId) return;
+    setSessions((current) => ({
       ...current,
-      [actionId]: 'dispatched',
+      [callId]: {
+        status:
+          stream.playbackState === 'playing'
+            ? 'playing'
+            : stream.playbackState === 'paused'
+              ? 'paused'
+              : stream.playbackState === 'ended'
+                ? analysisByCall[callId] === 'analyzing'
+                  ? 'analyzing'
+                  : 'processed'
+                : stream.state === 'connecting'
+                  ? 'connecting'
+                  : stream.state === 'error'
+                    ? 'error'
+                    : (current[callId]?.status ?? 'queued'),
+        transcriptTurns: stream.transcriptTurns,
+        partialTranscript: stream.partialTranscript,
+        currentTime: stream.currentTime,
+        duration: stream.duration,
+        error: stream.error,
+      },
     }));
-  }
+  }, [
+    analysisByCall,
+    stream.activeCallId,
+    stream.currentTime,
+    stream.duration,
+    stream.error,
+    stream.partialTranscript,
+    stream.playbackState,
+    stream.state,
+    stream.transcriptTurns,
+  ]);
 
-  const actionLabel =
-    stage === 'ready'
-      ? 'Run scenario'
-      : stage === 'complete'
-        ? 'Replay scenario'
-        : 'Streaming scenario';
+  useEffect(() => {
+    const timer = window.setTimeout(persistActiveStream, 0);
+    return () => window.clearTimeout(timer);
+  }, [persistActiveStream]);
+
+  const startOrToggleCall = useCallback(
+    async (call: ScenarioCall) => {
+      selectCall(call);
+      const session = sessions[call.id] ?? EMPTY_SESSION;
+
+      if (
+        stream.activeCallId === call.id &&
+        (stream.playbackState === 'playing' ||
+          stream.playbackState === 'paused')
+      ) {
+        await stream.toggleFixture();
+        return;
+      }
+
+      if (stream.activeCallId && stream.activeCallId !== call.id) {
+        persistActiveStream();
+        setSessions((current) => ({
+          ...current,
+          [stream.activeCallId as string]: {
+            ...(current[stream.activeCallId as string] ?? EMPTY_SESSION),
+            status: 'paused',
+          },
+        }));
+      }
+
+      const restarting =
+        session.status === 'processed' ||
+        session.currentTime >= session.duration;
+      setSessions((current) => ({
+        ...current,
+        [call.id]: {
+          ...(current[call.id] ?? EMPTY_SESSION),
+          status: 'connecting',
+          error: '',
+          ...(restarting
+            ? {
+                transcriptTurns: [],
+                partialTranscript: '',
+                currentTime: 0,
+              }
+            : {}),
+        },
+      }));
+
+      try {
+        let audioUrl = generatedAudioUrls.current[call.id];
+        if (!audioUrl) {
+          const staticUrl = preGeneratedAudioUrl(call.id);
+          const staticResponse = await fetch(staticUrl, {
+            method: 'HEAD',
+            cache: 'no-store',
+          });
+          if (staticResponse.ok) {
+            audioUrl = staticUrl;
+          } else {
+            setSessions((current) => ({
+              ...current,
+              [call.id]: {
+                ...(current[call.id] ?? EMPTY_SESSION),
+                status: 'generating',
+                error: '',
+              },
+            }));
+            const response = await fetch('/api/gradium-conversation', {
+              method: 'POST',
+              headers: { 'content-type': 'application/json' },
+              body: JSON.stringify({ turns: call.turns }),
+            });
+            if (!response.ok) {
+              const body = (await response.json().catch(() => ({}))) as {
+                error?: string;
+              };
+              throw new Error(
+                body.error ?? 'Gradium could not generate this synthetic call.',
+              );
+            }
+            audioUrl = URL.createObjectURL(await response.blob());
+          }
+          generatedAudioUrls.current[call.id] = audioUrl;
+        }
+
+        const initialTurns = restarting ? [] : session.transcriptTurns;
+        await stream.startFixture(audioUrl, {
+          callId: call.id,
+          initialTurns,
+          startAt: restarting ? 0 : session.currentTime,
+        });
+      } catch (error) {
+        const errorMessage =
+          error instanceof Error
+            ? error.message
+            : 'The synthetic call could not be prepared.';
+        setSessions({
+          ...sessions,
+          [call.id]: {
+            ...(sessions[call.id] ?? EMPTY_SESSION),
+            status: 'error',
+            error: errorMessage,
+          },
+        });
+      }
+    },
+    [persistActiveStream, selectCall, sessions, stream],
+  );
+
+  useEffect(() => {
+    const callId = stream.activeCallId;
+    if (!callId || stream.finalTurns.length === 0) return;
+    const turnCount = stream.finalTurns.length;
+    if (lastAnalyzedTurnCount.current[callId] >= turnCount) return;
+    lastAnalyzedTurnCount.current[callId] = turnCount;
+    const sourceScenario = Object.values(scenarios).find((item) =>
+      item.calls.some((call) => call.id === callId),
+    );
+    const call = sourceScenario?.calls.find((item) => item.id === callId);
+    if (!call) return;
+    const callLabel = genericCallLabel(
+      call,
+      sourceScenario?.calls.indexOf(call) ?? 0,
+    );
+
+    const transcript = stream.finalTranscript.trim();
+    if (transcript.length < 8) return;
+    const controller = new AbortController();
+    const elapsed = Date.now() - (lastAnalysisStartedAt.current[callId] ?? 0);
+    const analysisDelay = Math.max(900, 4_500 - elapsed);
+    const timer = window.setTimeout(() => {
+      lastAnalysisStartedAt.current[callId] = Date.now();
+      setAnalysisByCall((current) => ({ ...current, [callId]: 'analyzing' }));
+      setAnalysisErrors((current) => ({ ...current, [callId]: '' }));
+
+      void fetch('/api/analyze-incident', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        signal: controller.signal,
+        body: JSON.stringify({
+          transcript,
+          callTitle: callLabel,
+          previousIncident: incidentMemories[callId]?.incident ?? null,
+        }),
+      })
+        .then(async (response) => {
+          const body: unknown = await response.json();
+          if (!response.ok || !isIncidentAnalysis(body)) {
+            const errorBody = body as { error?: string };
+            throw new Error(
+              errorBody.error ?? 'The incident analysis was not valid.',
+            );
+          }
+          setIncidentMemories((current) => ({
+            ...current,
+            [callId]: {
+              callId,
+              callLabel,
+              updatedAt: Date.now(),
+              incident: body.incident,
+              coordinates:
+                current[callId]?.incident.locationName ===
+                body.incident.locationName
+                  ? current[callId].coordinates
+                  : null,
+              geocodedName:
+                current[callId]?.incident.locationName ===
+                body.incident.locationName
+                  ? current[callId].geocodedName
+                  : null,
+            },
+          }));
+          const createdAt = Date.now();
+          setReasoningByCall((current) => {
+            const previousTraces = current[callId] ?? [];
+            const latestTraces = [...body.reasoningEvents]
+              .reverse()
+              .map((event, index) => ({
+                ...event,
+                id: `${callId}-${turnCount}-${createdAt}-${index}`,
+                createdAt,
+                transcriptTurnCount: turnCount,
+              }));
+            return {
+              ...current,
+              [callId]: [...latestTraces, ...previousTraces],
+            };
+          });
+          setAnalysisByCall((current) => ({ ...current, [callId]: 'ready' }));
+
+          const locationName = body.incident.locationName.trim();
+          if (
+            locationName &&
+            !/^(unknown|location not established|not established)$/i.test(
+              locationName,
+            ) &&
+            lastGeocodeLocation.current[callId] !== locationName
+          ) {
+            lastGeocodeLocation.current[callId] = locationName;
+            void fetch('/api/geocode-location', {
+              method: 'POST',
+              headers: { 'content-type': 'application/json' },
+              body: JSON.stringify({ location: locationName }),
+            })
+              .then(async (geocodeResponse) => {
+                const geocode =
+                  (await geocodeResponse.json()) as GeocodeResponse;
+                if (
+                  !geocodeResponse.ok ||
+                  !geocode.available ||
+                  !geocode.coordinates
+                ) {
+                  return;
+                }
+                setIncidentMemories((current) => {
+                  const memory = current[callId];
+                  if (
+                    !memory ||
+                    memory.incident.locationName !== locationName
+                  ) {
+                    return current;
+                  }
+                  return {
+                    ...current,
+                    [callId]: {
+                      ...memory,
+                      coordinates: geocode.coordinates ?? null,
+                      geocodedName: geocode.displayName ?? locationName,
+                    },
+                  };
+                });
+              })
+              .catch(() => undefined);
+          }
+        })
+        .catch((error) => {
+          if (error instanceof Error && error.name === 'AbortError') return;
+          setAnalysisByCall((current) => ({
+            ...current,
+            [callId]: incidentMemories[callId] ? 'ready' : 'error',
+          }));
+          setAnalysisErrors((current) => ({
+            ...current,
+            [callId]:
+              error instanceof Error
+                ? error.message
+                : 'Operational analysis is temporarily delayed. Existing incident memory remains active.',
+          }));
+        });
+    }, analysisDelay);
+
+    return () => {
+      window.clearTimeout(timer);
+      controller.abort();
+    };
+  }, [
+    incidentMemories,
+    stream.activeCallId,
+    stream.finalTranscript,
+    stream.finalTurns.length,
+  ]);
+
+  const changeScenario = useCallback(
+    (nextScenarioId: ScenarioId) => {
+      persistActiveStream();
+      stream.stop();
+      const nextScenario = scenarios[nextScenarioId];
+      setScenarioId(nextScenarioId);
+      setSelectedCallId(nextScenario.calls[0]?.id ?? '');
+      setActionStatuses({});
+    },
+    [persistActiveStream, stream],
+  );
+
+  const resetExercise = useCallback(() => {
+    stream.reset();
+    for (const url of Object.values(generatedAudioUrls.current)) {
+      if (url.startsWith('blob:')) URL.revokeObjectURL(url);
+    }
+    generatedAudioUrls.current = {};
+    lastAnalyzedTurnCount.current = {};
+    lastAnalysisStartedAt.current = {};
+    lastGeocodeLocation.current = {};
+    setSessions({});
+    setIncidentMemories({});
+    setReasoningByCall({});
+    setAnalysisByCall({});
+    setAnalysisErrors({});
+    setActionStatuses({});
+    setSelectedCallId(calls[0]?.id ?? '');
+  }, [calls, stream]);
+
+  useEffect(
+    () => () => {
+      for (const url of Object.values(generatedAudioUrls.current)) {
+        if (url.startsWith('blob:')) URL.revokeObjectURL(url);
+      }
+    },
+    [],
+  );
+
+  const briefingText = selectedMemory
+    ? `${selectedMemory.incident.locationName}. ${selectedMemory.incident.summary} Access is ${selectedMemory.incident.access}. People at risk: ${selectedMemory.incident.peopleAtRisk}. Injuries: ${selectedMemory.incident.injuries}.`
+    : '';
 
   return (
-    <TooltipProvider>
-      <main className="min-h-[100dvh] bg-[#0b1012] text-[#edf2f0]">
-        <header className="flex min-h-16 flex-wrap items-center gap-3 border-b border-white/8 bg-[#0c1214] px-4 py-3 lg:px-6">
-          <div className="flex min-w-0 items-center gap-3">
-            <div className="grid size-9 shrink-0 place-items-center rounded-md border border-[#d79b39]/35 bg-[#d79b39]/10 text-[#e3aa4c]">
-              <Waves className="size-5" aria-hidden="true" />
-            </div>
-            <div className="min-w-0">
-              <p className="truncate text-[15px] font-semibold tracking-tight">
-                CrisisSignal
-              </p>
-              <p className="truncate font-mono text-[10px] uppercase tracking-[0.12em] text-[#7f918d]">
-                Multi-hazard crisis memory
-              </p>
-            </div>
-          </div>
+    <div className="crisis-dashboard min-h-screen bg-[#0c1214] text-[#e7ecea]">
+      <Sidebar activeView={activeView} onViewChange={setActiveView} />
+      <div className="lg:pl-[216px]">
+        <Header
+          scenarioId={scenarioId}
+          activeView={activeView}
+          onScenarioChange={changeScenario}
+          onViewChange={setActiveView}
+          onReset={resetExercise}
+        />
 
-          <div className="ml-auto flex flex-wrap items-center justify-end gap-2">
-            <Badge className="hidden border-[#d79b39]/30 bg-[#d79b39]/10 font-mono text-[9px] uppercase tracking-[0.08em] text-[#e6b35f] xl:inline-flex">
-              Demo · no external dispatch
-            </Badge>
-            <Select value={scenarioId} onValueChange={changeScenario}>
-              <SelectTrigger
-                size="sm"
-                aria-label="Choose disaster scenario"
-                className="w-[130px] border-white/10 bg-white/[0.025] text-xs text-[#c6d1ce]"
-              >
-                <SelectValue>{scenario.shortName}</SelectValue>
-              </SelectTrigger>
-              <SelectContent className="border-white/10 bg-[#11191b] text-[#d7e0dd]">
-                {(Object.keys(scenarios) as ScenarioId[]).map((id) => (
-                  <SelectItem key={id} value={id}>
-                    {scenarios[id].shortName}
-                  </SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
-            <Button
-              size="sm"
-              onClick={startSimulation}
-              disabled={
-                stage === 'public' ||
-                stage === 'field' ||
-                stream.state === 'connecting' ||
-                stream.state === 'listening'
-              }
-              className="min-w-[132px] bg-[#d79b39] text-[#1d160b] hover:bg-[#e9ae4c]"
-            >
-              {stage === 'public' || stage === 'field' ? (
-                <LoaderCircle
-                  className="size-3.5 animate-spin"
-                  aria-hidden="true"
+        <main className="mx-auto max-w-[1800px] p-3 sm:p-4 lg:p-5">
+          {activeView === 'operations' && (
+            <>
+              <section className="grid items-start gap-3 xl:grid-cols-[minmax(0,1.18fr)_minmax(440px,0.82fr)]">
+                <MapPanel
+                  selectedMemory={selectedMemory}
+                  displayedIncident={displayedIncident}
+                  incidentRecords={mapIncidentRecords}
+                  mapStatus={mapStatus}
                 />
-              ) : (
-                <Play className="size-3.5" aria-hidden="true" />
-              )}
-              {actionLabel}
-            </Button>
-            <Tooltip>
-              <TooltipTrigger
-                render={
-                  <Button
-                    variant="ghost"
-                    size="icon"
-                    aria-label="Reset incident"
-                    onClick={resetSimulation}
-                  />
-                }
-              >
-                <RefreshCw className="size-4" />
-              </TooltipTrigger>
-              <TooltipContent>Reset incident</TooltipContent>
-            </Tooltip>
-            <Tooltip>
-              <TooltipTrigger
-                render={
-                  <Button
-                    variant="ghost"
-                    size="icon"
-                    aria-label="Notifications"
-                  />
-                }
-              >
-                <Bell className="size-4" />
-              </TooltipTrigger>
-              <TooltipContent>Notifications</TooltipContent>
-            </Tooltip>
-          </div>
-        </header>
+                <CallWorkspace
+                  calls={calls}
+                  selectedCall={selectedCall}
+                  sessions={sessions}
+                  activeCallId={stream.activeCallId}
+                  playbackState={stream.playbackState}
+                  onSelect={selectCall}
+                  onToggle={(call) => void startOrToggleCall(call)}
+                  selectedSession={selectedSession}
+                  analysisState={selectedAnalysisState}
+                />
+              </section>
 
-        <div className="grid min-h-[calc(100dvh-4rem)] grid-cols-1 lg:grid-cols-[208px_minmax(0,1fr)_410px]">
-          <Sidebar liveMode={liveMode} />
-
-          <section className="min-w-0 bg-[#0e1517]">
-            <div className="flex min-h-[76px] flex-wrap items-center gap-3 border-b border-white/8 px-4 py-3 lg:px-5">
-              <div className="min-w-0">
-                <div className="flex items-center gap-2">
-                  <span
-                    className={`size-2 rounded-full ${
-                      stage === 'public' ||
-                      stage === 'field' ||
-                      stream.state === 'listening'
-                        ? 'animate-pulse bg-[#65c9a3] shadow-[0_0_0_4px_rgb(77_187_145/12%)]'
-                        : liveIncident || stage === 'complete'
-                          ? 'bg-[#dd644c] shadow-[0_0_0_4px_rgb(221_100_76/13%)]'
-                          : 'bg-[#667773]'
-                    }`}
-                    aria-hidden="true"
-                  />
-                  <h1 className="truncate text-sm font-semibold">
-                    {liveMode
-                      ? 'Live multi-hazard incident intake'
-                      : scenario.exerciseTitle}
-                  </h1>
-                </div>
-                <p className="mt-1 pl-4 text-xs text-[#7f918d]">
-                  {liveMode
-                    ? 'Finalized speech turns become a structured, source-linked incident record.'
-                    : 'Choose a hazard, stream the reports, then authorize simulated response actions.'}
-                </p>
-              </div>
-              <div className="ml-auto flex items-center gap-3 font-mono text-[10px] text-[#7c8d89]">
-                <span className="flex items-center gap-1.5">
-                  <Clock3 className="size-3.5" aria-hidden="true" />
-                  {liveIncident || stage === 'complete'
-                    ? '11:18'
-                    : '11:06'} ICT
-                </span>
-                <span className="hidden items-center gap-1.5 sm:flex">
-                  <ShieldCheck
-                    className="size-3.5 text-[#4dbb91]"
-                    aria-hidden="true"
-                  />
-                  Source-linked memory
-                </span>
-              </div>
-            </div>
-
-            <div className="grid grid-rows-[430px_auto]">
-              <VinhMap
-                status={mapStatus}
-                hazardType={displayedIncident.hazardType}
-                metricLabel={displayedIncident.metricLabel}
-                metricValue={metricValue}
-                selectedLocation={selectedLocation}
-                incidentLocation={incidentLocation}
-                activeIncidentLocations={activeIncidentLocations}
-                evidenceMode={liveIncident ? 'live' : 'simulation'}
+              <ObservedLocations
+                memories={memoryList}
+                selectedCallId={selectedCall?.id ?? ''}
+                onSelectCall={(callId) => {
+                  const call = calls.find((item) => item.id === callId);
+                  if (call) selectCall(call);
+                }}
               />
 
-              <div className="border-t border-white/8 bg-[#0c1214] p-4 lg:p-5">
-                <div className="flex flex-wrap items-start gap-4">
-                  <div className="min-w-0 flex-1">
-                    <p className="font-mono text-[10px] uppercase tracking-[0.12em] text-[#71827e]">
-                      Selected map object
-                    </p>
-                    <h2 className="mt-1 text-base font-semibold">
-                      {selected.name}
-                    </h2>
-                    <p className="text-xs text-[#899a96]">{selected.meta}</p>
-                  </div>
-                  <div className="flex items-center gap-2">
-                    <StatusBadge
-                      status={mapStatus}
-                      isIncident={selectedIsIncident}
-                      incident={displayedIncident}
-                    />
-                    <Button
-                      variant="outline"
-                      size="sm"
-                      className="border-white/10 bg-white/[0.03] text-[#c5d0cd]"
-                    >
-                      <Layers3 className="size-3.5" aria-hidden="true" />
-                      Layers
-                    </Button>
-                  </div>
-                </div>
+              <IncidentMemoryGrid
+                memories={memoryList}
+                selectedCallId={selectedCall?.id ?? ''}
+                onSelectCall={(callId) => {
+                  const call = calls.find((item) => item.id === callId);
+                  if (call) selectCall(call);
+                }}
+              />
 
-                <div className="mt-4 grid gap-px overflow-hidden rounded-md border border-white/8 bg-white/8 sm:grid-cols-3">
-                  <Metric
-                    label={displayedIncident.metricLabel}
-                    value={metricValue ?? 'No confirmed value'}
-                    live={
-                      analysisState === 'analyzing' ||
-                      (stage === 'field' && !metricKnown)
-                    }
-                  />
-                  <Metric
-                    label="Access"
-                    value={
-                      liveIncident
-                        ? titleCase(liveIncident.access)
-                        : accessKnown
-                          ? titleCase(scenario.incident.access)
-                          : 'Not established'
-                    }
-                    live={stage === 'field' && !accessKnown}
-                  />
-                  <Metric
-                    label="People at risk"
-                    value={
-                      liveIncident
-                        ? liveIncident.peopleAtRisk
-                        : peopleKnown
-                          ? scenario.incident.peopleAtRisk
-                          : 'Not established'
-                    }
-                    live={stage === 'field' && !peopleKnown}
-                  />
-                </div>
-
-                <TrackedPlaces
-                  selectedLocation={selectedLocation}
-                  onSelect={setSelectedLocation}
+              <section className="mt-3 grid gap-3 xl:grid-cols-[1.15fr_0.85fr_0.9fr]">
+                <ReasoningTrail
+                  callLabel={
+                    selectedCall
+                      ? genericCallLabel(
+                          selectedCall,
+                          Math.max(0, calls.indexOf(selectedCall)),
+                        )
+                      : undefined
+                  }
+                  events={selectedReasoning}
+                  state={selectedAnalysisState}
+                  error={selectedAnalysisError}
                 />
-
-                <div className="mt-5 space-y-3">
-                  <LiveSummary
-                    scenario={scenario}
-                    summary={{
-                      locationKnown,
-                      hazardKnown,
-                      trendKnown,
-                      metricKnown,
-                      accessKnown,
-                      peopleKnown,
-                    }}
-                    stage={stage}
-                    liveIncident={liveIncident}
-                    analysisState={analysisState}
+                <BriefingPanel
+                  memory={selectedMemory}
+                  text={briefingText}
+                  speaking={gradiumTts.state === 'loading'}
+                  error={gradiumTts.error}
+                  onSpeak={() => {
+                    if (briefingText)
+                      void gradiumTts.speak(briefingText, 'operator');
+                  }}
+                />
+                {selectedMemory ? (
+                  <ResponseActions
+                    incident={selectedMemory.incident}
+                    statuses={actionStatuses}
+                    onDispatch={(actionId) =>
+                      setActionStatuses((current) => ({
+                        ...current,
+                        [actionId]: 'dispatched',
+                      }))
+                    }
                   />
+                ) : (
+                  <AwaitingActions />
+                )}
+              </section>
+            </>
+          )}
 
-                  {(stage === 'complete' || liveIncident) && (
-                    <BriefingPanel
-                      text={liveIncident?.summary ?? scenario.briefing}
-                      visible={briefingVisible}
-                      onSpeak={speakBriefing}
-                    />
-                  )}
-
-                  {actionsIncident && (
-                    <ResponseActions
-                      incident={actionsIncident}
-                      statuses={actionStatuses}
-                      onDispatch={dispatchAction}
-                    />
-                  )}
-
-                </div>
-              </div>
-            </div>
-          </section>
-
-          <LiveOperationsPanel
-            scenario={scenario}
-            stage={stage}
-            revealedWords={revealedWords}
-            liveIncident={liveIncident}
-            analysisState={analysisState}
-            analysisError={analysisError}
-            stream={stream}
-            onStartLive={startLiveIncident}
-            onStopLive={stream.stop}
-            onSpeakOperator={speakOperatorPrompt}
-            calls={calls}
-            callStatuses={callStatuses}
-            selectedCallId={selectedCallId}
-            onSelectCall={setSelectedCallId}
-            reasoningEntries={reasoningEntries}
-            fixtureMode={fixtureMode}
-          />
-        </div>
-      </main>
-    </TooltipProvider>
+          {activeView === 'architecture' && <ArchitectureView />}
+        </main>
+      </div>
+    </div>
   );
 }
 
-function Sidebar({ liveMode }: { liveMode: boolean }) {
+function Sidebar({
+  activeView,
+  onViewChange,
+}: {
+  activeView: WorkspaceView;
+  onViewChange: (view: WorkspaceView) => void;
+}) {
   return (
-    <aside className="hidden border-r border-white/8 bg-[#0c1214] lg:flex lg:flex-col">
-      <nav className="space-y-1 p-3" aria-label="Primary navigation">
-        <p className="px-2 pb-2 pt-3 font-mono text-[10px] uppercase tracking-[0.14em] text-[#647470]">
-          Command workspace
-        </p>
-        {navItems.map(({ label, icon: Icon, active }) => (
-          <Button
-            key={label}
-            variant="ghost"
-            className={`h-9 w-full justify-start gap-2.5 px-2.5 text-xs ${
-              active
-                ? 'bg-[#d79b39]/10 text-[#f0c477] hover:bg-[#d79b39]/15 hover:text-[#f0c477]'
-                : 'text-[#91a29e] hover:bg-white/5 hover:text-[#e7eeec]'
-            }`}
-          >
-            <Icon className="size-4" aria-hidden="true" />
-            {label}
-          </Button>
-        ))}
-      </nav>
-      <div className="mt-auto border-t border-white/8 p-3">
-        <div className="mb-3 rounded-md border border-white/8 bg-white/[0.025] p-3">
-          <div className="flex items-center gap-2 text-xs text-[#aab8b5]">
-            <Radio className="size-4 text-[#4dbb91]" aria-hidden="true" />
-            {liveMode ? 'Live pipeline active' : 'Streaming pipeline ready'}
-          </div>
-          <p className="mt-2 font-mono text-[10px] leading-relaxed text-[#667773]">
-            Live intake uses AssemblyAI Universal-3 Pro. Scenario replay uses
-            local speech synthesis so the exercise works without a microphone.
+    <aside className="fixed inset-y-0 left-0 z-30 hidden w-[216px] border-r border-white/7 bg-[#101719] lg:flex lg:flex-col">
+      <div className="flex h-[68px] items-center gap-3 border-b border-white/7 px-5">
+        <div className="grid size-8 place-items-center rounded-md border border-[#d79b39]/30 bg-[#d79b39]/10 text-[#e1ab52]">
+          <Waves className="size-4" aria-hidden="true" />
+        </div>
+        <div>
+          <p className="text-sm font-semibold tracking-tight">CrisisSignal</p>
+          <p className="text-xs uppercase tracking-[0.12em] text-[#667773]">
+            Crisis coordination
           </p>
         </div>
-        <Button
-          variant="ghost"
-          className="w-full justify-start gap-2 px-2 text-xs text-[#82938f]"
-        >
-          <Settings className="size-4" aria-hidden="true" />
-          Exercise settings
-        </Button>
       </div>
-    </aside>
-  );
-}
-
-type SummaryState = {
-  locationKnown: boolean;
-  hazardKnown: boolean;
-  trendKnown: boolean;
-  metricKnown: boolean;
-  accessKnown: boolean;
-  peopleKnown: boolean;
-};
-
-type StreamController = ReturnType<typeof useAssemblyAIStream>;
-
-function LiveOperationsPanel({
-  scenario,
-  stage,
-  revealedWords,
-  liveIncident,
-  analysisState,
-  analysisError,
-  stream,
-  onStartLive,
-  onStopLive,
-  onSpeakOperator,
-  calls,
-  callStatuses,
-  selectedCallId,
-  onSelectCall,
-  reasoningEntries,
-  fixtureMode,
-}: {
-  scenario: Scenario;
-  stage: StreamStage;
-  revealedWords: number;
-  liveIncident: IncidentSnapshot | null;
-  analysisState: AnalysisState;
-  analysisError: string;
-  stream: StreamController;
-  onStartLive: () => Promise<void>;
-  onStopLive: () => void;
-  onSpeakOperator: (text: string) => void;
-  calls: ScenarioCall[];
-  callStatuses: Record<string, CallStatus>;
-  selectedCallId: string;
-  onSelectCall: (callId: string) => void;
-  reasoningEntries: ReasoningEntry[];
-  fixtureMode: boolean;
-}) {
-  const realStreamVisible =
-    stream.state !== 'idle' || stream.finalTurns.length > 0 || liveIncident;
-
-  return (
-    <aside className="border-t border-white/8 bg-[#0b1113] lg:border-l lg:border-t-0">
-      <div className="flex h-12 items-center border-b border-white/8 px-4">
-        <Headphones className="mr-2 size-4 text-[#d79b39]" aria-hidden="true" />
-        <h2 className="text-xs font-semibold">Live crisis stream</h2>
-        <Badge
-          className={`ml-auto font-mono text-[9px] ${
-            stage === 'public' || stage === 'field' || stream.state === 'listening'
-              ? 'bg-[#4dbb91]/12 text-[#78d0ae]'
-              : analysisState === 'analyzing'
-                ? 'bg-[#d79b39]/12 text-[#e6b35f]'
-                : 'bg-white/7 text-[#9baba7]'
-          }`}
-        >
-          {stream.state === 'listening' || stage === 'public' || stage === 'field'
-            ? 'LIVE'
-            : analysisState === 'analyzing'
-              ? 'ANALYZING'
-              : liveIncident || stage === 'complete'
-                ? 'COMPLETE'
-                : 'READY'}
-        </Badge>
-      </div>
-
-      <div className="space-y-3 p-4">
-        {(!realStreamVisible || fixtureMode) && (
-          <>
-            <CallQueue
-              calls={calls}
-              statuses={callStatuses}
-              selectedCallId={selectedCallId}
-              onSelect={onSelectCall}
-            />
-            <SelectedCallConversation
-              call={calls.find((item) => item.id === selectedCallId) ?? calls[0]}
-              status={callStatuses[selectedCallId] ?? 'queued'}
-              stage={stage}
-              revealedWords={revealedWords}
-              onSpeakOperator={onSpeakOperator}
-              scenario={scenario}
-              liveTranscript={[stream.finalTranscript, stream.partialTranscript].filter(Boolean).join(' ')}
-            />
-          </>
-        )}
-
-        {realStreamVisible ? (
-          <>
-            <LiveMicrophone
-              stream={stream}
-              analysisState={analysisState}
-              analysisError={analysisError}
-              onStart={onStartLive}
-              onStop={onStopLive}
-            />
-            {liveIncident && <LiveOperatorPrompt incident={liveIncident} />}
-          </>
-        ) : null}
-
-        <ReasoningTrail entries={reasoningEntries} />
-
-      </div>
-    </aside>
-  );
-}
-
-function CallQueue({
-  calls,
-  statuses,
-  selectedCallId,
-  onSelect,
-}: {
-  calls: ScenarioCall[];
-  statuses: Record<string, CallStatus>;
-  selectedCallId: string;
-  onSelect: (callId: string) => void;
-}) {
-  return (
-    <section className="rounded-md border border-white/9 bg-[#0f1719] p-3">
-      <div className="flex items-center gap-2">
-        <AudioLines className="size-4 text-[#d79b39]" aria-hidden="true" />
-        <h3 className="text-xs font-semibold">Incoming crisis calls</h3>
-        <span className="ml-auto font-mono text-[9px] uppercase tracking-[0.1em] text-[#71827e]">
-          {calls.length} sources
-        </span>
-      </div>
-      <p className="mt-1 text-[10px] leading-relaxed text-[#72827e]">
-        Calls are correlated into one shared Vinh City incident record.
-      </p>
-      <Badge className="mt-2 bg-[#4dbb91]/10 font-mono text-[8px] text-[#78d0ae]">
-        {calls.some((call) => call.audioUrl) ? 'ASSEMBLYAI FIXTURE PIPELINE' : 'OFFLINE SYNTHETIC REPLAY'}
-      </Badge>
-      <div className="mt-3 max-h-[350px] space-y-2 overflow-y-auto pr-1">
-        {calls.map((call, index) => {
-          const status = statuses[call.id] ?? 'queued';
-          const active = call.id === selectedCallId;
+      <nav className="space-y-1 p-3" aria-label="Primary navigation">
+        {navItems.map(({ id, label, icon: Icon }) => {
+          const active = id === activeView;
           return (
             <button
-              key={call.id}
+              key={id}
               type="button"
-              onClick={() => onSelect(call.id)}
-              aria-pressed={active}
-              className={`w-full rounded-md border p-2.5 text-left transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#d79b39] ${
+              aria-current={active ? 'page' : undefined}
+              onClick={() => onViewChange(id)}
+              className={`flex w-full items-center gap-3 rounded-md px-3 py-2.5 text-left text-xs transition-colors ${
                 active
-                  ? 'border-[#d79b39]/35 bg-[#d79b39]/8'
-                  : 'border-white/8 bg-[#11191b] hover:bg-white/[0.04]'
+                  ? 'bg-white/[0.055] text-[#e1e7e5]'
+                  : 'text-[#748580] hover:bg-white/[0.035] hover:text-[#aebbb7]'
               }`}
             >
-              <div className="flex items-center gap-2">
-                <span className="font-mono text-[9px] text-[#71827e]">CALL {String(index + 1).padStart(2, '0')}</span>
-                <span className={`ml-auto font-mono text-[8px] uppercase tracking-[0.08em] ${
-                  status === 'processed' ? 'text-[#65c9a3]' : status === 'queued' ? 'text-[#667773]' : 'text-[#e0ad59]'
-                }`}>
-                  {status}
-                </span>
-              </div>
-              <p className="mt-1 truncate text-[11px] font-medium text-[#cbd5d2]">{call.title}</p>
-              <div className="mt-1 flex items-center gap-2 text-[9px] text-[#71827e]">
-                <span>{call.source}</span>
-                <span>·</span>
-                <span className={call.priority === 'urgent' ? 'text-[#ef8f7c]' : 'text-[#8e9e9a]'}>{call.priority}</span>
-              </div>
+              <Icon className="size-3.5" aria-hidden="true" />
+              {label}
             </button>
           );
         })}
-      </div>
-    </section>
+      </nav>
+    </aside>
   );
 }
 
-function SelectedCallConversation({
-  call,
-  status,
-  stage,
-  revealedWords,
-  scenario,
-  onSpeakOperator,
-  liveTranscript,
-}: {
-  call: ScenarioCall | undefined;
-  status: CallStatus;
-  stage: StreamStage;
-  revealedWords: number;
-  scenario: Scenario;
-  onSpeakOperator: (text: string) => void;
-  liveTranscript: string;
-}) {
-  if (!call) return null;
-  const primaryReport = call.id === scenario.calls[0]?.id ? scenario.publicReport : scenario.fieldReport;
-  const livePrimary = call.id === scenario.calls[0]?.id && stage === 'public';
-  const liveField = call.id === scenario.calls[1]?.id && stage === 'field';
-  const live = livePrimary || liveField;
-  const liveWords = primaryReport.text.split(/\s+/).filter(Boolean);
-  const liveText = live
-    ? liveTranscript || liveWords.slice(0, revealedWords).join(' ')
-    : primaryReport.text;
+function ArchitectureView() {
+  const stages = [
+    {
+      step: '01',
+      title: 'Synthetic crisis calls',
+      icon: Volume2,
+      accent: 'text-[#d8a556]',
+      border: 'border-[#d79b39]/24',
+      detail:
+        'Gradium generates complete, natural two-voice operator and reporter conversations as prepared WAV audio.',
+    },
+    {
+      step: '02',
+      title: 'Live speech recognition',
+      icon: AudioLines,
+      accent: 'text-[#73c8aa]',
+      border: 'border-[#4dbb91]/24',
+      detail:
+        'Playback-clocked PCM audio is streamed to AssemblyAI Universal-3 Pro for partial and finalized transcription.',
+    },
+    {
+      step: '03',
+      title: 'Operational analysis',
+      icon: Sparkles,
+      accent: 'text-[#aaa0dd]',
+      border: 'border-[#7766ba]/26',
+      detail:
+        'AssemblyAI LLM Gateway converts cumulative finalized speech into source-linked memory and auditable analysis events.',
+    },
+    {
+      step: '04',
+      title: 'Crisis coordination',
+      icon: Activity,
+      accent: 'text-[#df927f]',
+      border: 'border-[#dd644c]/24',
+      detail:
+        'The dashboard updates the map, incident cards, command briefing, and human-reviewed response proposals.',
+    },
+  ];
 
   return (
-    <section className="rounded-md border border-[#4dbb91]/22 bg-[#101a19] p-3">
-      <div className="flex items-start gap-2">
-        <div className="min-w-0 flex-1">
-          <div className="flex items-center gap-2">
-            <Headphones className="size-3.5 text-[#65c9a3]" aria-hidden="true" />
-            <h3 className="truncate text-xs font-semibold">{call.title}</h3>
-          </div>
-          <p className="mt-1 font-mono text-[9px] uppercase tracking-[0.08em] text-[#71827e]">{call.source} · conversation turns</p>
+    <section className="overflow-hidden rounded-md border border-white/8 bg-[#11191b]">
+      <div className="border-b border-white/8 px-5 py-5">
+        <div className="flex items-center gap-2">
+          <Layers3 className="size-4 text-[#d79b39]" aria-hidden="true" />
+          <h1 className="text-base font-semibold">System architecture</h1>
         </div>
-        <Badge className="bg-[#4dbb91]/12 font-mono text-[8px] text-[#78d0ae]">{status}</Badge>
-      </div>
-      {status === 'queued' ? (
-        <p className="mt-3 text-[10px] leading-relaxed text-[#72827e]">Waiting for this source call to arrive in the simulation.</p>
-      ) : (
-        <div className="mt-3 space-y-2">
-          {call.turns.map((turn, index) => (
-            <div key={`${call.id}-${index}`} className={`rounded-md border p-2.5 ${turn.speaker === 'operator' ? 'border-[#7184c5]/25 bg-[#111827]' : 'border-white/7 bg-black/10'}`}>
-              <div className="flex items-center gap-2 font-mono text-[8px] uppercase tracking-[0.1em] text-[#778782]">
-                <span className={turn.speaker === 'operator' ? 'text-[#9eafea]' : turn.speaker === 'field' ? 'text-[#e0ad59]' : 'text-[#65c9a3]'}>{turn.speaker}</span>
-                {index === call.turns.length - 1 && live && <span className="text-[#65c9a3]">LIVE TRANSCRIPT</span>}
-              </div>
-              <p className="mt-1 text-[11px] leading-relaxed text-[#cbd5d2]">{live && index === 0 ? liveText : turn.text}</p>
-            </div>
-          ))}
-          {call.turns.some((turn) => turn.speaker === 'operator') && (
-            <Button size="sm" variant="outline" className="border-[#7184c5]/25 bg-[#7184c5]/8 text-[#b8c4f1] hover:bg-[#7184c5]/14" onClick={() => onSpeakOperator(call.turns.find((turn) => turn.speaker === 'operator')?.text ?? '')}>
-              <Volume2 className="size-3.5" aria-hidden="true" />
-              Play operator turn
-            </Button>
-          )}
-        </div>
-      )}
-    </section>
-  );
-}
-
-function LiveOperatorPrompt({ incident }: { incident: IncidentSnapshot }) {
-  const question = getOperatorQuestion(incident);
-
-  return (
-    <article className="rounded-md border border-[#7184c5]/25 bg-[#111827] p-3">
-      <div className="flex items-center gap-2">
-        <Users className="size-3.5 text-[#9eafea]" aria-hidden="true" />
-        <p className="text-[10px] font-semibold uppercase tracking-[0.1em] text-[#b8c4f1]">
-          Operator turn suggested
+        <p className="mt-2 max-w-3xl text-xs leading-relaxed text-[#7f8f8b]">
+          CrisisSignal turns natural synthetic conversations into a live,
+          evidence-linked operational picture without exposing provider keys to
+          the browser.
         </p>
       </div>
-      <p className="mt-2 text-[11px] leading-relaxed text-[#d4dcf6]">{question}</p>
-      <p className="mt-2 font-mono text-[9px] uppercase tracking-[0.08em] text-[#8390c3]">
-        Generated from the latest finalized turn · ask before dispatch
-      </p>
+
+      <div className="grid gap-3 p-5 lg:grid-cols-4">
+        {stages.map(({ step, title, icon: Icon, accent, border }, index) => (
+          <div key={step} className="relative">
+            <article
+              className={`h-full rounded-md border bg-[#0c1416] p-4 ${border}`}
+            >
+              <div className="flex items-center justify-between">
+                <span className="text-xs font-semibold tracking-[0.12em] text-[#667773]">
+                  {step}
+                </span>
+                <Icon className={`size-5 ${accent}`} aria-hidden="true" />
+              </div>
+              <h2 className="mt-7 text-xs font-semibold">{title}</h2>
+              <p className="mt-2 text-xs leading-relaxed text-[#84938f]">
+                {stages[index].detail}
+              </p>
+            </article>
+            {index < stages.length - 1 && (
+              <span
+                className="absolute -right-3 top-1/2 z-10 hidden size-6 -translate-y-1/2 place-items-center rounded-full border border-white/10 bg-[#11191b] text-xs text-[#7d8c88] lg:grid"
+                aria-hidden="true"
+              >
+                →
+              </span>
+            )}
+          </div>
+        ))}
+      </div>
+
+      <div className="grid gap-px border-t border-white/8 bg-white/8 md:grid-cols-3">
+        <ArchitectureBranch
+          icon={MapPin}
+          title="Location intelligence"
+          detail="Nominatim and Photon resolve extracted Vinh place names; MapLibre renders pins and incident metadata."
+        />
+        <ArchitectureBranch
+          icon={Database}
+          title="Session memory"
+          detail="Each call retains its transcript, structured incident object, geocoded location, and full analysis trace."
+        />
+        <ArchitectureBranch
+          icon={ShieldCheck}
+          title="Human control"
+          detail="The model proposes follow-up actions, but every simulated dispatch requires explicit operator authorization."
+        />
+      </div>
+    </section>
+  );
+}
+
+function ArchitectureBranch({
+  icon: Icon,
+  title,
+  detail,
+}: {
+  icon: typeof Activity;
+  title: string;
+  detail: string;
+}) {
+  return (
+    <article className="bg-[#0f1719] p-5">
+      <Icon className="size-4 text-[#75a8c4]" aria-hidden="true" />
+      <h2 className="mt-3 text-xs font-semibold">{title}</h2>
+      <p className="mt-2 text-xs leading-relaxed text-[#758580]">{detail}</p>
     </article>
   );
 }
 
-function getOperatorQuestion(incident: IncidentSnapshot) {
-  return incident.hazardType === 'flood'
-    ? 'Can you confirm the nearest landmark, whether anyone is trapped, and if the water is still rising?'
-    : incident.hazardType === 'landslide'
-      ? 'Can everyone stay clear of the slope, and is anyone isolated or injured right now?'
-      : 'Can you confirm how many people are exposed and whether there is an immediate electrical or structural danger?';
-}
-
-type ReasoningEntry = {
-  label: string;
-  detail: string;
-  state: 'done' | 'active' | 'waiting';
-};
-
-function buildReasoningEntries({
-  stage,
-  liveIncident,
-  analysisState,
-  streamTurns,
-  summary,
-  callCount,
-  processedCallCount,
-  activeCallTitle,
+function Header({
+  scenarioId,
+  activeView,
+  onScenarioChange,
+  onViewChange,
+  onReset,
 }: {
-  stage: StreamStage;
-  liveIncident: IncidentSnapshot | null;
-  analysisState: AnalysisState;
-  streamTurns: number;
-  summary: SummaryState;
-  callCount: number;
-  processedCallCount: number;
-  activeCallTitle: string;
-}): ReasoningEntry[] {
-  if (liveIncident || streamTurns > 0 || analysisState !== 'idle') {
-    return [
-      {
-        label: 'Turn finalized',
-        detail: streamTurns
-          ? `AssemblyAI finalized ${streamTurns} ${streamTurns === 1 ? 'speech turn' : 'speech turns'}.`
-          : 'Waiting for the first finalized AssemblyAI turn.',
-        state: streamTurns ? 'done' : 'active',
-      },
-      {
-        label: 'Extract incident facts',
-        detail: liveIncident
-          ? 'Hazard, place, measurement, access, and people-at-risk fields were extracted into the shared record.'
-          : 'The LLM Gateway is separating stated facts from unknowns.',
-        state: liveIncident ? 'done' : analysisState === 'analyzing' ? 'active' : 'waiting',
-      },
-      {
-        label: 'Check map context',
-        detail: liveIncident
-          ? `Matched the report to ${liveIncident.locationName}.`
-          : 'The map match will update when a location is identified.',
-        state: liveIncident ? 'done' : 'waiting',
-      },
-      {
-        label: 'Prepare response options',
-        detail: 'Actions are proposals only; an operator must authorize every dispatch.',
-        state: liveIncident ? 'done' : 'waiting',
-      },
-    ];
-  }
-
-  return [
-    {
-      label: 'Incoming calls',
-      detail: `${processedCallCount} of ${callCount} source calls processed. ${activeCallTitle} is the current focus.`,
-      state: stage === 'complete' ? 'done' : stage === 'public' || stage === 'field' ? 'active' : 'waiting',
-    },
-    {
-      label: 'Extract incident facts',
-      detail: summary.hazardKnown
-        ? 'Hazard and location language are linked to the shared incident memory.'
-        : 'Waiting for enough speech to identify the incident.',
-      state: summary.hazardKnown ? 'done' : stage === 'public' ? 'active' : 'waiting',
-    },
-    {
-      label: 'Reconcile sources',
-      detail: summary.metricKnown
-        ? 'Field measurement and access status are source-linked.'
-        : 'Waiting for a confirming field or utility call.',
-      state: summary.accessKnown ? 'done' : stage === 'field' ? 'active' : 'waiting',
-    },
-    {
-      label: 'Prepare response options',
-      detail: 'Recommendations remain proposals until the operator authorizes them.',
-      state: stage === 'complete' ? 'done' : 'waiting',
-    },
-  ];
+  scenarioId: ScenarioId;
+  activeView: WorkspaceView;
+  onScenarioChange: (scenarioId: ScenarioId) => void;
+  onViewChange: (view: WorkspaceView) => void;
+  onReset: () => void;
+}) {
+  return (
+    <header className="sticky top-0 z-20 border-b border-white/7 bg-[#0c1214]/94 uppercase backdrop-blur">
+      <div className="mx-auto flex max-w-[1800px] flex-wrap items-center gap-3 px-4 py-3 lg:px-5">
+        <div className="min-w-0 flex-1">
+          <h1 className="truncate text-base font-semibold tracking-[0.06em]">
+            Operations Dashboard
+          </h1>
+        </div>
+        <Badge className="hidden border-[#4dbb91]/20 bg-[#4dbb91]/8 text-xs text-[#78c9aa] sm:flex">
+          GRADIUM → ASSEMBLYAI STT → LLM GATEWAY
+        </Badge>
+        <Select
+          value={scenarioId}
+          onValueChange={(value) => onScenarioChange(value as ScenarioId)}
+        >
+          <SelectTrigger className="h-9 w-[178px] border-white/10 bg-[#121a1c] text-xs">
+            <SelectValue />
+          </SelectTrigger>
+          <SelectContent>
+            {Object.values(scenarios).map((item) => (
+              <SelectItem key={item.id} value={item.id}>
+                {item.shortName} exercise
+              </SelectItem>
+            ))}
+          </SelectContent>
+        </Select>
+        <Button
+          size="sm"
+          variant="outline"
+          className="border-white/10 bg-white/[0.025] text-[#9dadA8]"
+          onClick={onReset}
+        >
+          <RefreshCw className="size-3.5" aria-hidden="true" />
+          Reset
+        </Button>
+      </div>
+      <nav
+        className="flex gap-1 overflow-x-auto border-t border-white/7 px-3 py-2 lg:hidden"
+        aria-label="Workspace views"
+      >
+        {navItems.map(({ id, label }) => (
+          <button
+            key={id}
+            type="button"
+            aria-current={activeView === id ? 'page' : undefined}
+            onClick={() => onViewChange(id)}
+            className={`shrink-0 rounded px-2.5 py-1.5 text-xs ${
+              activeView === id
+                ? 'bg-white/[0.07] text-[#dbe3e0]'
+                : 'text-[#73837f]'
+            }`}
+          >
+            {label}
+          </button>
+        ))}
+      </nav>
+    </header>
+  );
 }
 
-function ReasoningTrail({ entries }: { entries: ReasoningEntry[] }) {
+function MapPanel({
+  selectedMemory,
+  displayedIncident,
+  incidentRecords,
+  mapStatus,
+}: {
+  selectedMemory: IncidentMemory | undefined;
+  displayedIncident: IncidentSnapshot;
+  incidentRecords: MapIncidentRecord[];
+  mapStatus: 'idle' | 'reported' | 'verified';
+}) {
   return (
-    <section className="rounded-md border border-[#8c78bf]/25 bg-[#13121b] p-3">
-      <div className="flex items-center gap-2">
-        <Sparkles className="size-4 text-[#b7a5e6]" aria-hidden="true" />
-        <h3 className="text-xs font-semibold">LLM reasoning</h3>
-        <Badge className="ml-auto bg-[#8c78bf]/15 font-mono text-[9px] text-[#c4b5ed]">
-          OPERATIONAL TRACE
+    <section className="flex h-[680px] min-h-0 flex-col overflow-hidden rounded-md border border-white/8 bg-[#11191b]">
+      <div className="flex flex-wrap items-center gap-3 border-b border-white/8 px-4 py-3">
+        <div>
+          <div className="flex items-center gap-2">
+            <MapPin className="size-3.5 text-[#d79b39]" aria-hidden="true" />
+            <h2 className="text-xs font-semibold">Incident Map</h2>
+          </div>
+        </div>
+        <Badge className="ml-auto border-[#3b91aa]/20 bg-[#3b91aa]/8 text-[8px] text-[#8dc6d4]">
+          {selectedMemory
+            ? `${hazardLabels[displayedIncident.hazardType]} · ${displayedIncident.metricValue}`
+            : 'Awaiting call evidence'}
         </Badge>
       </div>
-      <p className="mt-1 text-[10px] leading-relaxed text-[#897e9f]">
-        Concise, source-linked rationale for the command team — not hidden chain-of-thought.
-      </p>
-      <div className="mt-3 space-y-2">
-        {entries.map((entry) => (
-          <div key={entry.label} className="flex gap-2.5 rounded border border-white/7 bg-black/10 p-2.5">
-            <span
-              className={`mt-0.5 size-2 shrink-0 rounded-full ${
-                entry.state === 'done'
-                  ? 'bg-[#65c9a3]'
-                  : entry.state === 'active'
-                    ? 'animate-pulse bg-[#e0ad59]'
-                    : 'bg-[#667773]'
-              }`}
-              aria-hidden="true"
-            />
-            <div className="min-w-0">
-              <p className="font-mono text-[9px] uppercase tracking-[0.08em] text-[#a99cc5]">
-                {entry.label}
-              </p>
-              <p className="mt-1 text-[10px] leading-relaxed text-[#bdc4c1]">
-                {entry.detail}
-              </p>
-            </div>
-          </div>
-        ))}
+      <div className="relative min-h-[470px] flex-1">
+        <VinhMap
+          status={mapStatus}
+          hazardType={displayedIncident.hazardType}
+          metricLabel={displayedIncident.metricLabel}
+          metricValue={selectedMemory ? displayedIncident.metricValue : null}
+          incidentCoordinates={selectedMemory?.coordinates ?? null}
+          incidentRecords={incidentRecords}
+          evidenceMode="live"
+        />
+      </div>
+      <div className="grid grid-cols-2 gap-px border-t border-white/8 bg-white/8 sm:grid-cols-4">
+        <Metric
+          label="Hazard"
+          value={
+            selectedMemory
+              ? hazardLabels[displayedIncident.hazardType]
+              : 'Not established'
+          }
+        />
+        <Metric
+          label={displayedIncident.metricLabel}
+          value={
+            selectedMemory ? displayedIncident.metricValue : 'Awaiting STT'
+          }
+        />
+        <Metric
+          label="Access"
+          value={
+            selectedMemory
+              ? titleCase(displayedIncident.access)
+              : 'Not established'
+          }
+        />
+        <Metric
+          label="People at risk"
+          value={selectedMemory ? displayedIncident.peopleAtRisk : 'Unknown'}
+        />
       </div>
     </section>
   );
 }
 
-function LiveSummary({
-  scenario,
-  summary,
-  stage,
-  liveIncident,
+function CallWorkspace({
+  calls,
+  selectedCall,
+  sessions,
+  activeCallId,
+  playbackState,
+  onSelect,
+  onToggle,
+  selectedSession,
   analysisState,
 }: {
-  scenario: Scenario;
-  summary: SummaryState;
-  stage: StreamStage;
-  liveIncident: IncidentSnapshot | null;
+  calls: ScenarioCall[];
+  selectedCall: ScenarioCall | undefined;
+  sessions: Record<string, CallSession>;
+  activeCallId: string | null;
+  playbackState: string;
+  onSelect: (call: ScenarioCall) => void;
+  onToggle: (call: ScenarioCall) => void;
+  selectedSession: CallSession;
   analysisState: AnalysisState;
 }) {
-  const incident = liveIncident ?? scenario.incident;
-  const live =
-    stage === 'public' || stage === 'field' || analysisState === 'analyzing';
-  const listening =
-    analysisState === 'analyzing' ? 'Analyzing latest turn' : 'Listening';
-  const rows = liveIncident
-    ? [
-        ['Hazard', hazardLabels[incident.hazardType]],
-        ['Location', incident.locationName],
-        ['Trend', incident.trend],
-        [incident.metricLabel, incident.metricValue],
-        ['Access', titleCase(incident.access)],
-        ['People', incident.peopleAtRisk],
-      ]
-    : [
-        [
-          'Hazard',
-          summary.hazardKnown ? hazardLabels[incident.hazardType] : listening,
-        ],
-        ['Location', summary.locationKnown ? incident.locationName : listening],
-        ['Trend', summary.trendKnown ? incident.trend : 'Not established'],
-        [
-          incident.metricLabel,
-          summary.metricKnown ? incident.metricValue : 'Not established',
-        ],
-        [
-          'Access',
-          summary.accessKnown ? titleCase(incident.access) : 'Not established',
-        ],
-        [
-          'People',
-          summary.peopleKnown ? incident.peopleAtRisk : 'Not established',
-        ],
-      ];
-
   return (
-    <section className="rounded-md border border-[#d79b39]/20 bg-[#11191b] p-3">
-      <div className="flex items-center gap-2">
-        <Activity className="size-4 text-[#d79b39]" aria-hidden="true" />
-        <h3 className="text-xs font-semibold">AI live incident memory</h3>
-        {live && (
-          <span className="ml-auto flex items-center gap-1.5 font-mono text-[9px] text-[#65c9a3]">
-            <span className="size-1.5 animate-pulse rounded-full bg-[#65c9a3]" />
-            UPDATING
+    <section className="flex h-[680px] min-h-0 flex-col overflow-hidden rounded-md border border-white/8 bg-[#11191b]">
+      <div className="border-b border-white/8 px-4 py-3">
+        <div className="flex items-center gap-2">
+          <Headphones className="size-3.5 text-[#65c9a3]" aria-hidden="true" />
+          <h2 className="text-xs font-semibold">Incoming crisis calls</h2>
+          <Badge className="ml-auto bg-white/6 text-[8px] text-[#82918e]">
+            {calls.length} CHANNELS
+          </Badge>
+        </div>
+      </div>
+
+      <div className="max-h-[255px] overflow-y-auto border-b border-white/8 p-2">
+        <div className="space-y-1.5">
+          {calls.map((call, callIndex) => {
+            const session = sessions[call.id] ?? EMPTY_SESSION;
+            const selected = selectedCall?.id === call.id;
+            const isActive = activeCallId === call.id;
+            const isPlaying = isActive && playbackState === 'playing';
+            const callLabel = genericCallLabel(call, callIndex);
+            return (
+              <div
+                key={call.id}
+                className={`grid grid-cols-[minmax(0,1fr)_auto] items-center gap-2 rounded-md border p-2 transition-colors ${
+                  selected
+                    ? 'border-[#d79b39]/35 bg-[#d79b39]/7'
+                    : 'border-white/7 bg-black/10 hover:bg-white/[0.025]'
+                }`}
+              >
+                <button
+                  type="button"
+                  aria-label={`Open ${callLabel}`}
+                  className="min-w-0 text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#d79b39]"
+                  onClick={() => onSelect(call)}
+                >
+                  <div className="flex items-center gap-2">
+                    <span
+                      className={`size-1.5 rounded-full ${callSignalColor(session.status)}`}
+                    />
+                    <span className="truncate text-[10px] font-medium text-[#d5ddda]">
+                      {callLabel}
+                    </span>
+                    <span className="ml-auto text-[8px] text-[#63736f]">
+                      {formatTime(session.currentTime)}
+                      {session.duration > 0
+                        ? ` / ${formatTime(session.duration)}`
+                        : ''}
+                    </span>
+                  </div>
+                  <div className="mt-1 flex items-center gap-2 pl-3.5 text-[8px] uppercase tracking-[0.07em] text-[#667773]">
+                    <span>{call.source}</span>
+                    <span>·</span>
+                    <span className={statusColor(session.status)}>
+                      {session.status}
+                    </span>
+                  </div>
+                </button>
+                <Button
+                  size="icon-sm"
+                  variant="outline"
+                  className="border-white/10 bg-white/[0.025] text-[#b5c0bd]"
+                  aria-label={`${isPlaying ? 'Pause' : 'Play'} ${callLabel}`}
+                  disabled={
+                    session.status === 'generating' ||
+                    session.status === 'connecting'
+                  }
+                  onClick={() => onToggle(call)}
+                >
+                  {session.status === 'generating' ||
+                  session.status === 'connecting' ? (
+                    <LoaderCircle className="size-3.5 animate-spin" />
+                  ) : isPlaying ? (
+                    <Pause className="size-3.5" />
+                  ) : (
+                    <Play className="size-3.5" />
+                  )}
+                </Button>
+              </div>
+            );
+          })}
+        </div>
+      </div>
+
+      {selectedCall ? (
+        <SelectedCallTranscript
+          callLabel={genericCallLabel(
+            selectedCall,
+            Math.max(0, calls.indexOf(selectedCall)),
+          )}
+          session={selectedSession}
+          active={activeCallId === selectedCall.id}
+          analysisState={analysisState}
+          onToggle={() => onToggle(selectedCall)}
+        />
+      ) : (
+        <div className="grid flex-1 place-items-center text-[11px] text-[#667773]">
+          Select an incoming call.
+        </div>
+      )}
+    </section>
+  );
+}
+
+function SelectedCallTranscript({
+  callLabel,
+  session,
+  active,
+  analysisState,
+  onToggle,
+}: {
+  callLabel: string;
+  session: CallSession;
+  active: boolean;
+  analysisState: AnalysisState;
+  onToggle: () => void;
+}) {
+  const playing = session.status === 'playing';
+  const progress = session.duration
+    ? Math.min(100, (session.currentTime / session.duration) * 100)
+    : 0;
+  const waiting =
+    session.transcriptTurns.length === 0 && !session.partialTranscript;
+  return (
+    <div className="flex min-h-0 flex-1 flex-col">
+      <div className="border-b border-white/8 bg-[#0f1719] p-3">
+        <div className="flex items-center gap-2">
+          <Button
+            size="icon-sm"
+            className="bg-[#d79b39] text-[#21180b] hover:bg-[#e3aa4c]"
+            aria-label={`${playing ? 'Pause' : 'Play'} selected call`}
+            onClick={onToggle}
+          >
+            {session.status === 'generating' ||
+            session.status === 'connecting' ? (
+              <LoaderCircle className="size-3.5 animate-spin" />
+            ) : playing ? (
+              <Pause className="size-3.5" />
+            ) : (
+              <Play className="size-3.5" />
+            )}
+          </Button>
+          <div className="min-w-0 flex-1">
+            <p className="truncate text-[11px] font-medium">{callLabel}</p>
+            <p className="mt-0.5 text-[8px] uppercase tracking-[0.08em] text-[#687975]">
+              Gradium synthetic conversation · AssemblyAI Universal-3 Pro
+            </p>
+          </div>
+          <span className="text-[9px] text-[#82918e]">
+            {formatTime(session.currentTime)} / {formatTime(session.duration)}
+          </span>
+        </div>
+        <div className="mt-3 h-1 overflow-hidden rounded-full bg-white/7">
+          <div
+            className="h-full rounded-full bg-[#d79b39] transition-[width] duration-100"
+            style={{ width: `${progress}%` }}
+          />
+        </div>
+      </div>
+
+      <div className="flex items-center gap-2 border-b border-white/7 px-3 py-2 text-[8px] uppercase tracking-[0.1em] text-[#6f807c]">
+        <span
+          className={`size-1.5 rounded-full ${playing ? 'animate-pulse bg-[#65c9a3]' : 'bg-[#667773]'}`}
+        />
+        Live STT · {session.transcriptTurns.length} finalized turns
+        {analysisState === 'analyzing' && (
+          <span className="ml-auto flex items-center gap-1 text-[#d8a556]">
+            <Sparkles className="size-3 animate-pulse" /> updating memory
           </span>
         )}
       </div>
-      <div className="mt-3 divide-y divide-white/7 border-y border-white/7">
-        {rows.map(([label, value]) => (
-          <div
-            key={label}
-            className="grid grid-cols-[82px_1fr] gap-2 py-2 text-[11px]"
-          >
-            <span className="font-mono text-[9px] uppercase tracking-[0.08em] text-[#697a76]">
-              {label}
-            </span>
-            <span
-              className={`transition-colors ${
-                value === listening
-                  ? 'animate-pulse text-[#71827e]'
-                  : value === 'Not established'
-                    ? 'text-[#687975]'
-                    : 'text-[#c8d4d1]'
-              }`}
-            >
-              {value}
-            </span>
+
+      <div className="flex min-h-0 flex-1 flex-col gap-2 overflow-hidden p-3">
+        {waiting ? (
+          <div className="grid h-full min-h-[180px] place-items-center rounded-md border border-dashed border-white/8 bg-black/10 p-6 text-center">
+            <div>
+              <AudioLines className="mx-auto size-5 text-[#596965]" />
+              <p className="mt-2 text-[10px] text-[#788984]">
+                {session.status === 'generating'
+                  ? 'Gradium is generating the complete two-voice call…'
+                  : session.status === 'connecting'
+                    ? 'Connecting the audio stream to AssemblyAI…'
+                    : 'Press play. Transcript text appears only after AssemblyAI hears the audio.'}
+              </p>
+            </div>
           </div>
-        ))}
+        ) : (
+          <LiveTranscriptText
+            turns={session.transcriptTurns}
+            partialTranscript={session.partialTranscript}
+          />
+        )}
+        {session.error && (
+          <p className="mt-3 flex items-start gap-2 rounded border border-[#d79b39]/20 bg-[#d79b39]/7 p-2 text-[9px] leading-relaxed text-[#d7ad69]">
+            <AlertTriangle className="mt-0.5 size-3 shrink-0" />
+            {session.error}
+          </p>
+        )}
+        {!active && session.status === 'paused' && (
+          <p className="mt-3 text-center text-[8px] uppercase tracking-[0.1em] text-[#71817d]">
+            Paused at {formatTime(session.currentTime)} · press play to
+            reconnect and resume
+          </p>
+        )}
       </div>
-      {(liveIncident || stage === 'complete') && (
-        <p className="mt-3 text-[10px] leading-relaxed text-[#9caeaa]">
-          {incident.summary}
-        </p>
-      )}
-      <p className="mt-3 font-mono text-[9px] leading-relaxed text-[#70817d]">
-        Missing facts remain unknown. Recommendations never execute without
-        operator authorization.
+    </div>
+  );
+}
+
+function LiveTranscriptText({
+  turns,
+  partialTranscript,
+}: {
+  turns: TranscriptTurn[];
+  partialTranscript: string;
+}) {
+  const transcriptRef = useRef<HTMLDivElement>(null);
+  const finalizedText = turns.map((turn) => turn.text).join(' ');
+
+  useEffect(() => {
+    const transcript = transcriptRef.current;
+    if (transcript) transcript.scrollTop = transcript.scrollHeight;
+  }, [finalizedText, partialTranscript]);
+
+  return (
+    <div
+      ref={transcriptRef}
+      className="min-h-0 flex-1 overflow-y-auto overscroll-contain rounded-md border border-white/8 bg-black/12 p-3"
+      aria-live="polite"
+      aria-label="Live AssemblyAI transcript"
+    >
+      <p className="whitespace-pre-wrap text-[11px] leading-6 text-[#d1d9d7]">
+        {finalizedText}
+        {finalizedText && partialTranscript ? ' ' : ''}
+        {partialTranscript && (
+          <span className="text-[#8ea09c] opacity-80">
+            {partialTranscript}
+            <span className="ml-1 inline-block size-1 animate-pulse rounded-full bg-[#65c9a3]" />
+          </span>
+        )}
       </p>
+    </div>
+  );
+}
+
+function ObservedLocations({
+  memories,
+  selectedCallId,
+  onSelectCall,
+}: {
+  memories: IncidentMemory[];
+  selectedCallId: string;
+  onSelectCall: (callId: string) => void;
+}) {
+  const discovered = Array.from(
+    memories.reduce((locations, memory) => {
+      const locationName = memory.incident.locationName.trim();
+      if (
+        !locationName ||
+        /^(unknown|location not established|not established)$/i.test(
+          locationName,
+        )
+      ) {
+        return locations;
+      }
+      const locationKey = locationName.toLocaleLowerCase('en-US');
+      const current = locations.get(locationKey) ?? [];
+      current.push(memory);
+      locations.set(locationKey, current);
+      return locations;
+    }, new globalThis.Map<string, IncidentMemory[]>()),
+  );
+
+  return (
+    <section className="mt-3 rounded-md border border-white/8 bg-[#11191b] p-3">
+      <div className="mb-2 flex items-center gap-2 text-[9px] uppercase tracking-[0.11em] text-[#70817d]">
+        <MapPin className="size-3.5" aria-hidden="true" />
+        Observed incident locations
+      </div>
+      {discovered.length === 0 ? (
+        <div className="rounded-md border border-dashed border-white/8 bg-black/10 px-4 py-6 text-center text-[9px] text-[#687975]">
+          Locations appear only after the LLM extracts a place from finalized
+          live STT.
+        </div>
+      ) : (
+        <div className="grid gap-2 sm:grid-cols-2 xl:grid-cols-5">
+          {discovered.map(([locationKey, locationMemories]) => {
+            const latest = locationMemories[0];
+            const active = locationMemories.some(
+              (memory) => memory.callId === selectedCallId,
+            );
+            return (
+              <button
+                key={locationKey}
+                type="button"
+                onClick={() => onSelectCall(latest.callId)}
+                aria-pressed={active}
+                className={`min-w-0 rounded-md border px-3 py-2 text-left transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#d79b39] ${
+                  active
+                    ? 'border-[#d79b39]/35 bg-[#d79b39]/9'
+                    : 'border-white/8 bg-[#0e1517] hover:bg-white/[0.04]'
+                }`}
+              >
+                <span className="flex items-center gap-2 truncate text-[10px] font-medium text-[#cbd5d2]">
+                  <span
+                    className={`size-1.5 rounded-full ${severityColor(latest.incident.severity)}`}
+                  />
+                  {latest.incident.locationName}
+                </span>
+                <span className="mt-1 block truncate pl-3.5 text-[8px] text-[#687975]">
+                  {locationMemories.length} incident{' '}
+                  {locationMemories.length === 1 ? 'object' : 'objects'} ·{' '}
+                  {latest.incident.metricLabel}: {latest.incident.metricValue}
+                </span>
+              </button>
+            );
+          })}
+        </div>
+      )}
+    </section>
+  );
+}
+
+function IncidentMemoryGrid({
+  memories,
+  selectedCallId,
+  onSelectCall,
+}: {
+  memories: IncidentMemory[];
+  selectedCallId: string;
+  onSelectCall: (callId: string) => void;
+}) {
+  return (
+    <section className="mt-3 rounded-md border border-[#d79b39]/18 bg-[#11191b] p-3">
+      <div className="flex items-center gap-2">
+        <Layers3 className="size-4 text-[#d79b39]" aria-hidden="true" />
+        <h2 className="text-xs font-semibold">AI live incident memory</h2>
+        <Badge className="ml-auto border-[#d79b39]/18 bg-[#d79b39]/7 text-[8px] text-[#d6a253]">
+          {memories.length} OBJECTS
+        </Badge>
+      </div>
+      <div className="mt-3 grid gap-2 md:grid-cols-2 xl:grid-cols-3 2xl:grid-cols-4">
+        {memories.length === 0 ? (
+          <div className="col-span-full rounded-md border border-dashed border-white/8 bg-black/10 px-4 py-8 text-center text-[9px] leading-relaxed text-[#687975]">
+            No incident memory exists yet. A card appears only after finalized
+            STT provides enough evidence for the LLM to create one.
+          </div>
+        ) : (
+          memories.map((memory) => (
+            <MemoryCard
+              key={memory.callId}
+              memory={memory}
+              selected={memory.callId === selectedCallId}
+              onSelect={() => onSelectCall(memory.callId)}
+            />
+          ))
+        )}
+      </div>
+    </section>
+  );
+}
+
+function MemoryCard({
+  memory,
+  selected,
+  onSelect,
+}: {
+  memory: IncidentMemory;
+  selected: boolean;
+  onSelect: () => void;
+}) {
+  const incident = memory.incident;
+  return (
+    <button
+      type="button"
+      onClick={onSelect}
+      className={`min-h-[180px] rounded-md border p-3 text-left transition-colors ${
+        selected
+          ? 'border-[#d79b39]/38 bg-[#d79b39]/7'
+          : 'border-white/8 bg-[#0d1416] hover:bg-white/[0.035]'
+      }`}
+    >
+      <div className="flex items-start gap-2">
+        <span
+          className={`mt-1 size-2 shrink-0 rounded-full ${severityColor(incident.severity)}`}
+        />
+        <div className="min-w-0 flex-1">
+          <p className="truncate text-[10px] font-semibold text-[#d8e0de]">
+            {incident.locationName}
+          </p>
+          <p className="mt-1 text-[8px] uppercase tracking-[0.08em] text-[#758580]">
+            {hazardLabels[incident.hazardType]} · {incident.confidence}{' '}
+            confidence
+          </p>
+        </div>
+        <ChevronRight className="size-3.5 text-[#687975]" />
+      </div>
+      <ul className="mt-3 space-y-1.5 pl-4 text-[9px] leading-relaxed text-[#aebbb7]">
+        <li className="list-disc">{incident.summary}</li>
+        <li className="list-disc">
+          {incident.metricLabel}: {incident.metricValue}
+        </li>
+        <li className="list-disc">
+          Access: {titleCase(incident.access)} · trend: {incident.trend}
+        </li>
+        <li className="list-disc">
+          People at risk: {incident.peopleAtRisk} · injuries:{' '}
+          {incident.injuries}
+        </li>
+      </ul>
+      <p className="mt-3 truncate border-t border-white/7 pt-2 text-[8px] text-[#61716d]">
+        SOURCE · {memory.callLabel}
+      </p>
+    </button>
+  );
+}
+
+function ReasoningTrail({
+  callLabel,
+  events,
+  state,
+  error,
+}: {
+  callLabel: string | undefined;
+  events: ReasoningTrace[];
+  state: AnalysisState;
+  error: string;
+}) {
+  return (
+    <section className="min-h-[330px] rounded-md border border-[#7766ba]/22 bg-[#12151c] p-3">
+      <div className="flex items-center gap-2">
+        <Sparkles className="size-4 text-[#a99ee0]" aria-hidden="true" />
+        <h2 className="text-xs font-semibold">LLM operational analysis</h2>
+        <Badge className="ml-auto border-[#7766ba]/20 bg-[#7766ba]/9 text-[8px] text-[#aaa0dd]">
+          {state === 'analyzing' ? 'RUNNING' : `${events.length} EVENTS`}
+        </Badge>
+      </div>
+      <div
+        className="mt-3 max-h-[420px] space-y-2 overflow-y-auto overscroll-contain pr-1"
+        data-analysis-scroll
+      >
+        {events.length === 0 ? (
+          <div className="grid min-h-[210px] place-items-center rounded-md border border-dashed border-white/8 bg-black/10 p-6 text-center">
+            <div>
+              {state === 'analyzing' ? (
+                <LoaderCircle className="mx-auto size-5 animate-spin text-[#a99ee0]" />
+              ) : (
+                <Sparkles className="mx-auto size-5 text-[#5f5a70]" />
+              )}
+              <p className="mt-2 text-[9px] leading-relaxed text-[#716c80]">
+                {state === 'analyzing'
+                  ? 'AssemblyAI LLM Gateway is evaluating the latest finalized turn.'
+                  : `Analysis begins when ${callLabel ?? 'the selected call'} produces a finalized STT turn.`}
+              </p>
+            </div>
+          </div>
+        ) : (
+          events.map((event) => (
+            <div
+              key={event.id}
+              className="rounded-md border border-white/7 bg-black/12 p-2.5"
+            >
+              <div className="flex items-center gap-2">
+                <span
+                  className={`size-1.5 rounded-full ${reasoningColor(event.kind)}`}
+                />
+                <span className="text-[8px] uppercase tracking-[0.1em] text-[#a99ee0]">
+                  {event.kind.replaceAll('_', ' ')}
+                </span>
+                <span className="truncate text-[9px] font-medium text-[#c9c5d7]">
+                  {event.title}
+                </span>
+                <span className="ml-auto shrink-0 text-[7px] text-[#666271]">
+                  {formatTraceTime(event.createdAt)} · turn{' '}
+                  {event.transcriptTurnCount}
+                </span>
+              </div>
+              <p className="mt-1.5 text-[9px] leading-relaxed text-[#a9acb3]">
+                {event.detail}
+              </p>
+              <p className="mt-2 border-l border-[#7766ba]/35 pl-2 text-[8px] italic leading-relaxed text-[#777481]">
+                Evidence: “{event.evidence}”
+              </p>
+            </div>
+          ))
+        )}
+        {state === 'analyzing' && events.length > 0 && (
+          <p className="flex items-center gap-1.5 text-[8px] uppercase tracking-[0.1em] text-[#9a91ca]">
+            <LoaderCircle className="size-3 animate-spin" /> latest turn in
+            progress
+          </p>
+        )}
+        {error && <p className="text-[9px] text-[#d5a35b]">{error}</p>}
+      </div>
     </section>
   );
 }
 
 function BriefingPanel({
+  memory,
   text,
-  visible,
+  speaking,
+  error,
   onSpeak,
 }: {
+  memory: IncidentMemory | undefined;
   text: string;
-  visible: boolean;
+  speaking: boolean;
+  error: string;
   onSpeak: () => void;
 }) {
   return (
-    <section className="animate-in rounded-md border border-[#4dbb91]/24 bg-[#101a19] p-3 fade-in slide-in-from-bottom-2 duration-300">
+    <section className="min-h-[330px] rounded-md border border-[#4dbb91]/22 bg-[#101a19] p-3">
       <div className="flex items-center gap-2">
         <Volume2 className="size-4 text-[#65c9a3]" aria-hidden="true" />
-        <h3 className="text-xs font-semibold">Live command briefing</h3>
+        <h2 className="text-xs font-semibold">Live command briefing</h2>
       </div>
-      {visible && (
-        <div className="mt-3" aria-live="polite">
-          <div className="mb-2 flex items-center gap-2 font-mono text-[9px] uppercase tracking-[0.1em] text-[#65c9a3]">
-            <Check className="size-3" aria-hidden="true" />
-            Incident memory synchronized
+      {memory ? (
+        <div className="mt-3">
+          <div className="flex items-center gap-2 text-[8px] uppercase tracking-[0.1em] text-[#65c9a3]">
+            <CheckCircle2 className="size-3" /> memory synchronized
           </div>
-          <p className="text-[11px] leading-relaxed text-[#c8d5d1]">{text}</p>
+          <p className="mt-3 text-[10px] leading-relaxed text-[#c8d5d1]">
+            {text}
+          </p>
+          <div className="mt-4 grid grid-cols-2 gap-px overflow-hidden rounded border border-white/7 bg-white/7">
+            <SmallFact
+              label="Severity"
+              value={titleCase(memory.incident.severity)}
+            />
+            <SmallFact
+              label="Confidence"
+              value={titleCase(memory.incident.confidence)}
+            />
+            <SmallFact
+              label="Access"
+              value={titleCase(memory.incident.access)}
+            />
+            <SmallFact label="Trend" value={memory.incident.trend} />
+          </div>
+        </div>
+      ) : (
+        <div className="grid min-h-[220px] place-items-center text-center text-[9px] leading-relaxed text-[#657672]">
+          The command briefing appears after the selected call creates an
+          incident memory object.
         </div>
       )}
       <Button
         size="sm"
         variant="outline"
-        className="mt-3 w-full border-[#4dbb91]/25 bg-[#4dbb91]/8 text-[#8dd7bb] hover:bg-[#4dbb91]/14 hover:text-[#a7e2cc]"
+        disabled={!memory || speaking}
+        className="mt-3 w-full border-[#4dbb91]/25 bg-[#4dbb91]/8 text-[#8dd7bb] hover:bg-[#4dbb91]/14"
         onClick={onSpeak}
       >
-        <Volume2 className="size-3.5" aria-hidden="true" />
-        Play spoken briefing
-      </Button>
-    </section>
-  );
-}
-
-function LiveMicrophone({
-  stream,
-  analysisState,
-  analysisError,
-  onStart,
-  onStop,
-}: {
-  stream: StreamController;
-  analysisState: AnalysisState;
-  analysisError: string;
-  onStart: () => Promise<void>;
-  onStop: () => void;
-}) {
-  const listening = stream.state === 'listening';
-  const transcript = [stream.finalTranscript, stream.partialTranscript]
-    .filter(Boolean)
-    .join(' ');
-
-  return (
-    <section className="rounded-md border border-[#4dbb91]/18 bg-[#0f1719] p-3">
-      <div className="flex items-center gap-2">
-        <Mic
-          className={`size-3.5 ${listening ? 'text-[#65c9a3]' : 'text-[#71827e]'}`}
-          aria-hidden="true"
-        />
-        <h3 className="text-[11px] font-medium">AssemblyAI live line</h3>
-        <Badge className="ml-auto bg-white/6 font-mono text-[8px] text-[#788985]">
-          ASSEMBLYAI LIVE · U3 PRO
-        </Badge>
-      </div>
-      <p className="mt-2 text-[10px] leading-relaxed text-[#687975]">
-        Speak naturally into the incident line. AssemblyAI transcribes finalized
-        turns and the LLM Gateway updates shared incident memory.
-      </p>
-
-      {(listening || transcript) && (
-        <div className="mt-3 overflow-hidden rounded-md border border-white/8 bg-black/15">
-          <Waveform active={listening} />
-          <div className="border-t border-white/8 p-2.5">
-            <TranscriptLabel active={listening} />
-            <p
-              className="mt-2 text-[11px] leading-relaxed text-[#bdcac6]"
-              aria-live="polite"
-            >
-              {transcript || 'Listening for the first report…'}
-            </p>
-          </div>
-        </div>
-      )}
-
-      {analysisState === 'analyzing' && (
-        <p className="mt-2 flex items-center gap-1.5 text-[10px] text-[#e0ad59]">
-          <Sparkles className="size-3 animate-pulse" aria-hidden="true" />
-          Updating incident memory from the latest finalized turn…
-        </p>
-      )}
-      {(stream.error || analysisError) && (
-        <p
-          className="mt-2 flex items-start gap-1.5 text-[10px] leading-relaxed text-[#d7a95f]"
-          role="alert"
-        >
-          <AlertTriangle
-            className="mt-0.5 size-3 shrink-0"
-            aria-hidden="true"
-          />
-          {stream.error || analysisError}
-        </p>
-      )}
-      <Button
-        size="sm"
-        variant="outline"
-        className="mt-3 w-full border-white/10 bg-white/[0.025] text-[#aebdb9]"
-        disabled={stream.state === 'connecting'}
-        onClick={() => {
-          if (listening) onStop();
-          else void onStart();
-        }}
-      >
-        {stream.state === 'connecting' ? (
-          <LoaderCircle className="size-3.5 animate-spin" aria-hidden="true" />
-        ) : listening ? (
-          <Pause className="size-3.5" aria-hidden="true" />
+        {speaking ? (
+          <LoaderCircle className="size-3.5 animate-spin" />
         ) : (
-          <Mic className="size-3.5" aria-hidden="true" />
+          <Volume2 className="size-3.5" />
         )}
-        {listening
-          ? 'Stop live intake'
-          : stream.state === 'connecting'
-            ? 'Connecting securely'
-            : transcript
-              ? 'Start a new live intake'
-              : 'Start live incident'}
+        {speaking ? 'Generating briefing' : 'Play spoken briefing'}
       </Button>
+      {error && <p className="mt-2 text-[9px] text-[#d5a35b]">{error}</p>}
     </section>
   );
 }
 
-function Waveform({ active }: { active: boolean }) {
+function AwaitingActions() {
   return (
-    <div className="waveform" aria-hidden="true">
-      {Array.from({ length: 42 }, (_, index) => (
-        <span
-          key={index}
-          className={active ? 'animate-pulse' : ''}
-          style={{
-            height: `${8 + ((index * 17) % 27)}px`,
-            animationDelay: `${index * 22}ms`,
-          }}
-        />
-      ))}
-    </div>
-  );
-}
-
-function TranscriptLabel({ active }: { active: boolean }) {
-  return (
-    <div className="flex items-center gap-2 font-mono text-[9px] uppercase tracking-[0.11em] text-[#6f807c]">
-      <span
-        className={`size-1.5 rounded-full ${
-          active ? 'animate-pulse bg-[#65c9a3]' : 'bg-[#667773]'
-        }`}
-        aria-hidden="true"
-      />
-      Live transcript
-    </div>
-  );
-}
-
-function TrackedPlaces({
-  selectedLocation,
-  onSelect,
-}: {
-  selectedLocation: KnownLocationId;
-  onSelect: (location: KnownLocationId) => void;
-}) {
-  return (
-    <div className="mt-4">
-      <div className="mb-2 flex items-center gap-2 font-mono text-[10px] uppercase tracking-[0.11em] text-[#70817d]">
-        <Route className="size-3.5" aria-hidden="true" />
-        Tracked places
+    <section className="min-h-[330px] rounded-md border border-[#dd644c]/18 bg-[#151817] p-3">
+      <div className="flex items-center gap-2">
+        <Send className="size-4 text-[#e3836e]" />
+        <h2 className="text-xs font-semibold">Recommended follow-up actions</h2>
       </div>
-      <div className="grid gap-2 sm:grid-cols-2 xl:grid-cols-5">
-        {(Object.keys(landmarks) as KnownLocationId[]).map((id) => {
-          const place = landmarks[id];
-          const active = id === selectedLocation;
-          return (
-            <button
-              key={id}
-              type="button"
-              onClick={() => onSelect(id)}
-              aria-pressed={active}
-              className={`min-w-0 rounded-md border px-3 py-2 text-left transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#d79b39] ${
-                active
-                  ? 'border-[#d79b39]/35 bg-[#d79b39]/9'
-                  : 'border-white/8 bg-[#101719] hover:bg-white/[0.05]'
-              }`}
-            >
-              <span className="block truncate text-[11px] font-medium text-[#cbd5d2]">
-                {place.name}
-              </span>
-              <span className="mt-0.5 block truncate text-[9px] text-[#687975]">
-                {place.meta}
-              </span>
-            </button>
-          );
-        })}
+      <div className="grid min-h-[250px] place-items-center text-center text-[9px] leading-relaxed text-[#6e7774]">
+        Proposals appear only after the LLM Gateway creates a source-linked
+        incident record. Human authorization remains required.
       </div>
-    </div>
+    </section>
   );
 }
 
-function StatusBadge({
-  status,
-  isIncident,
-  incident,
-}: {
-  status: 'idle' | 'reported' | 'verified';
-  isIncident: boolean;
-  incident: IncidentSnapshot;
-}) {
-  if (!isIncident) {
-    return <Badge className="bg-white/7 text-[#9baba7]">Reference place</Badge>;
-  }
-  if (status === 'verified') {
-    return (
-      <Badge className="border-[#dd644c]/35 bg-[#dd644c]/12 text-[#ef8f7c]">
-        {hazardLabels[incident.hazardType]} · {incident.metricValue}
-      </Badge>
-    );
-  }
-  if (status === 'reported') {
-    return (
-      <Badge className="border-[#3b91aa]/35 bg-[#3b91aa]/12 text-[#9ed5e2]">
-        {hazardLabels[incident.hazardType]} detected
-      </Badge>
-    );
-  }
-  return <Badge className="bg-white/7 text-[#9baba7]">Monitoring</Badge>;
-}
-
-function Metric({
-  label,
-  value,
-  live = false,
-}: {
-  label: string;
-  value: string;
-  live?: boolean;
-}) {
+function Metric({ label, value }: { label: string; value: string }) {
   return (
     <div className="bg-[#101719] px-3 py-2.5">
-      <div className="flex items-center gap-2">
-        <p className="font-mono text-[9px] uppercase tracking-[0.1em] text-[#657672]">
-          {label}
-        </p>
-        {live && (
-          <span
-            className="size-1.5 animate-pulse rounded-full bg-[#65c9a3]"
-            aria-hidden="true"
-          />
-        )}
-      </div>
-      <p className="mt-1 text-xs text-[#cbd6d3]">{value}</p>
+      <p className="text-[8px] uppercase tracking-[0.1em] text-[#657672]">
+        {label}
+      </p>
+      <p className="mt-1 truncate text-[10px] text-[#cbd6d3]">{value}</p>
     </div>
   );
+}
+
+function SmallFact({ label, value }: { label: string; value: string }) {
+  return (
+    <div className="bg-[#0f1717] p-2">
+      <p className="text-[8px] uppercase tracking-[0.08em] text-[#61736e]">
+        {label}
+      </p>
+      <p className="mt-1 truncate text-[9px] text-[#aebdb8]">{value}</p>
+    </div>
+  );
+}
+
+function callSignalColor(status: CallStatus) {
+  if (status === 'error') return 'bg-[#dd644c]';
+  if (status === 'playing' || status === 'analyzing') return 'bg-[#d79b39]';
+  if (status === 'processed') return 'bg-[#65c9a3]';
+  return 'bg-[#607b78]';
+}
+
+function statusColor(status: CallStatus) {
+  if (status === 'playing') return 'text-[#65c9a3]';
+  if (status === 'error') return 'text-[#dd7c68]';
+  if (
+    status === 'generating' ||
+    status === 'connecting' ||
+    status === 'analyzing'
+  )
+    return 'text-[#d7a14d]';
+  if (status === 'processed') return 'text-[#8f9d99]';
+  return 'text-[#667773]';
+}
+
+function severityColor(severity: IncidentSnapshot['severity']) {
+  if (severity === 'critical') return 'bg-[#ed5d4d]';
+  if (severity === 'high') return 'bg-[#dd764f]';
+  if (severity === 'moderate') return 'bg-[#d7a143]';
+  return 'bg-[#67968b]';
+}
+
+function reasoningColor(kind: ReasoningEvent['kind']) {
+  if (kind === 'action_proposal') return 'bg-[#dd8b55]';
+  if (kind === 'uncertainty') return 'bg-[#d7b359]';
+  if (kind === 'memory_create' || kind === 'memory_update')
+    return 'bg-[#65c9a3]';
+  if (kind === 'inference') return 'bg-[#9b8bd9]';
+  return 'bg-[#75a8c4]';
+}
+
+function formatTime(seconds: number) {
+  if (!Number.isFinite(seconds) || seconds <= 0) return '00:00';
+  const minutes = Math.floor(seconds / 60);
+  const remainder = Math.floor(seconds % 60);
+  return `${String(minutes).padStart(2, '0')}:${String(remainder).padStart(2, '0')}`;
+}
+
+function formatTraceTime(timestamp: number) {
+  return new Date(timestamp).toLocaleTimeString([], {
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+  });
 }
 
 function titleCase(value: string) {

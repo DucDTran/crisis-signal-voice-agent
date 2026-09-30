@@ -1,27 +1,13 @@
-import { isIncidentSnapshot } from '@/lib/incidents';
+import { isIncidentAnalysis } from '@/lib/incidents';
 import { serverEnv } from '@/lib/server-env';
 
-const hazardTypes = [
-  'flood',
-  'tropical_storm',
-  'landslide',
-  'earthquake',
-  'wildfire',
-  'building_collapse',
-  'other',
-  'unknown',
-] as const;
+type AnalyzeBody = {
+  transcript?: unknown;
+  callTitle?: unknown;
+  previousIncident?: unknown;
+};
 
-const locationIds = [
-  'bridge',
-  'station',
-  'market',
-  'university',
-  'mountain',
-  'unknown',
-] as const;
-
-const actionIds = [
+const validActionIds = new Set([
   'notify_disaster_command',
   'dispatch_rescue_canoes',
   'dispatch_medical_team',
@@ -30,56 +16,104 @@ const actionIds = [
   'dispatch_technical_team',
   'request_utility_shutdown',
   'issue_public_alert',
-] as const;
+]);
+const MAX_GATEWAY_ATTEMPTS = 3;
+const RETRY_BASE_DELAY_MS = 1_500;
+const MIN_GATEWAY_REQUEST_INTERVAL_MS = 1_500;
+let gatewayQueue: Promise<void> = Promise.resolve();
+let nextGatewayRequestAt = 0;
 
-const incidentSchema = {
-  type: 'object',
-  properties: {
-    hazardType: { type: 'string', enum: hazardTypes },
-    locationId: { type: 'string', enum: locationIds },
-    locationName: { type: 'string' },
-    summary: { type: 'string' },
-    severity: {
-      type: 'string',
-      enum: ['low', 'moderate', 'high', 'critical', 'unknown'],
-    },
-    confidence: { type: 'string', enum: ['low', 'medium', 'high'] },
-    metricLabel: { type: 'string' },
-    metricValue: { type: 'string' },
-    access: {
-      type: 'string',
-      enum: ['passable', 'restricted', 'impassable', 'unknown'],
-    },
-    trend: { type: 'string' },
-    peopleAtRisk: { type: 'string' },
-    injuries: { type: 'string' },
-    recommendedActionIds: {
-      type: 'array',
-      items: { type: 'string', enum: actionIds },
-      maxItems: 5,
-    },
-  },
-  required: [
-    'hazardType',
-    'locationId',
-    'locationName',
-    'summary',
-    'severity',
-    'confidence',
-    'metricLabel',
-    'metricValue',
-    'access',
-    'trend',
-    'peopleAtRisk',
-    'injuries',
-    'recommendedActionIds',
-  ],
-  additionalProperties: false,
-} as const;
+function isRetryableGatewayStatus(status: number) {
+  return status === 408 || status === 409 || status === 429 || status >= 500;
+}
 
-type AnalyzeBody = {
-  transcript?: unknown;
-};
+function sleep(milliseconds: number) {
+  return new Promise((resolve) => setTimeout(resolve, milliseconds));
+}
+
+async function queuedGatewayFetch(
+  apiKey: string,
+  body: string,
+  signal: AbortSignal,
+) {
+  let response: Response | undefined;
+  const request = gatewayQueue
+    .catch(() => undefined)
+    .then(async () => {
+      const wait = Math.max(0, nextGatewayRequestAt - Date.now());
+      if (wait > 0) await sleep(wait);
+      if (signal.aborted) {
+        const error = new Error('The queued analysis request was cancelled.');
+        error.name = 'AbortError';
+        throw error;
+      }
+      response = await fetch(
+        'https://llm-gateway.assemblyai.com/v1/chat/completions',
+        {
+          method: 'POST',
+          headers: {
+            authorization: apiKey,
+            'content-type': 'application/json',
+          },
+          signal,
+          cache: 'no-store',
+          body,
+        },
+      );
+      nextGatewayRequestAt = Date.now() + MIN_GATEWAY_REQUEST_INTERVAL_MS;
+    });
+  gatewayQueue = request.then(
+    () => undefined,
+    () => undefined,
+  );
+  await request;
+  if (!response) throw new Error('The analysis gateway returned no response.');
+  return response;
+}
+
+function displayString(value: unknown) {
+  if (typeof value === 'string' && value.trim()) return value.trim();
+  if (typeof value === 'number' || typeof value === 'boolean') {
+    return String(value);
+  }
+  return 'Unknown';
+}
+
+function normalizeAnalysis(value: unknown): unknown {
+  if (!value || typeof value !== 'object') return value;
+  const analysis = value as Record<string, unknown>;
+  if (!analysis.incident || typeof analysis.incident !== 'object') return value;
+  const incident = analysis.incident as Record<string, unknown>;
+  const actions = Array.isArray(incident.recommendedActionIds)
+    ? [
+        ...new Set(
+          incident.recommendedActionIds.filter(
+            (actionId): actionId is string =>
+              typeof actionId === 'string' && validActionIds.has(actionId),
+          ),
+        ),
+      ].slice(0, 5)
+    : [];
+  const reasoningEvents = Array.isArray(analysis.reasoningEvents)
+    ? analysis.reasoningEvents.slice(0, 6)
+    : analysis.reasoningEvents;
+
+  return {
+    ...analysis,
+    incident: {
+      ...incident,
+      locationName: displayString(incident.locationName),
+      summary: displayString(incident.summary),
+      metricLabel: displayString(incident.metricLabel),
+      metricValue: displayString(incident.metricValue),
+      trend: displayString(incident.trend),
+      peopleAtRisk: displayString(incident.peopleAtRisk),
+      injuries: displayString(incident.injuries),
+      recommendedActionIds: actions,
+    },
+    reasoningEvents,
+  };
+}
 
 export async function POST(request: Request) {
   const apiKey = serverEnv('ASSEMBLYAI_API_KEY');
@@ -99,6 +133,10 @@ export async function POST(request: Request) {
 
   const transcript =
     typeof body.transcript === 'string' ? body.transcript.trim() : '';
+  const callTitle =
+    typeof body.callTitle === 'string'
+      ? body.callTitle.trim().slice(0, 160)
+      : '';
   if (transcript.length < 8) {
     return Response.json(
       { error: 'More transcript context is required.' },
@@ -110,42 +148,45 @@ export async function POST(request: Request) {
   }
 
   const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), 18_000);
+  const timeout = setTimeout(() => controller.abort(), 22_000);
 
   try {
-    const response = await fetch(
-      'https://llm-gateway.assemblyai.com/v1/chat/completions',
-      {
-        method: 'POST',
-        headers: {
-          authorization: apiKey,
-          'content-type': 'application/json',
+    const gatewayBody = JSON.stringify({
+      model: serverEnv('ASSEMBLYAI_LLM_MODEL') ?? 'qwen3.5-4b-32k-fast',
+      temperature: 0.1,
+      max_tokens: 1_450,
+      messages: [
+        {
+          role: 'system',
+          content: `You are the incident-memory agent for an emergency coordination center in Vinh City, Vietnam. Return incident data as one JSON object with exactly two top-level keys: incident and reasoningEvents. Never return a schema, markdown, or commentary. incident must contain exactly these keys: hazardType, locationId, locationName, summary, severity, confidence, metricLabel, metricValue, access, trend, peopleAtRisk, injuries, recommendedActionIds. Allowed hazardType values are flood, tropical_storm, landslide, earthquake, wildfire, building_collapse, other, unknown. Allowed locationId values are bridge, station, market, university, mountain, unknown. Map Ben Thuy Bridge 1 to bridge, Vinh Railway Station to station, Vinh Market to market, Vinh University to university, and Nui Quyet or Dung Quyet Mountain to mountain; otherwise use unknown. Allowed severity values are low, moderate, high, critical, unknown. Allowed confidence values are low, medium, high. Allowed access values are passable, restricted, impassable, unknown. recommendedActionIds may contain at most five values chosen only from notify_disaster_command, dispatch_rescue_canoes, dispatch_medical_team, close_access_route, evacuate_area, dispatch_technical_team, request_utility_shutdown, issue_public_alert. reasoningEvents must contain one to six objects with exactly kind, title, detail, evidence. Allowed kind values are observation, inference, memory_create, memory_update, uncertainty, action_proposal. Update factual memory from the cumulative transcript. Each reasoning event must be a concise, auditable conclusion with direct transcript evidence, not private chain-of-thought. The evidence field must quote or closely excerpt the transcript in no more than 18 words. Never invent measurements, casualties, responders, executed actions, or locations. Use "Unknown" for missing facts. Recommendations remain human-reviewed proposals. Rescue canoes are appropriate only for flood rescue or evacuation. Keep incident.summary under 55 words and each event detail under 40 words.`,
         },
-        signal: controller.signal,
-        cache: 'no-store',
-        body: JSON.stringify({
-          model: serverEnv('ASSEMBLYAI_LLM_MODEL') ?? 'qwen3.5-4b-32k-fast',
-          temperature: 0.1,
-          max_tokens: 850,
-          messages: [
-            {
-              role: 'system',
-              content: `You maintain a source-linked emergency incident record for Vinh City, Vietnam. Return only one JSON object with no markdown or commentary. The object must conform exactly to this JSON Schema: ${JSON.stringify(incidentSchema)}. Extract only facts stated in the transcript. Never invent measurements, casualties, access status, responders, or locations. Use "Unknown" when evidence is missing. Map Ben Thuy Bridge 1 to bridge, Vinh Railway Station to station, Vinh Market to market, Vinh University to university, and Nui Quyet or Dung Quyet Mountain to mountain; otherwise use unknown. Choose one primary hazard. Keep the summary under 45 words. Recommend only proportionate action IDs from the schema. Recommendations are proposals for a human operator and must never imply that an action has already happened. Rescue canoes are appropriate only for floodwater rescue or evacuation. Confidence reflects transcript evidence quality, not model confidence. Include every required property and no additional properties.`,
-            },
-            {
-              role: 'user',
-              content: `Update the incident record from this cumulative live transcript:\n\n${transcript}`,
-            },
-          ],
-          post_processing_steps: [{ type: 'json-repair' }],
-        }),
-      },
-    );
+        {
+          role: 'user',
+          content: `Call: ${callTitle || 'Unlabeled incoming call'}\n\nCumulative live transcript:\n${transcript}\n\nPrevious incident record, if any:\n${JSON.stringify(body.previousIncident ?? null)}`,
+        },
+      ],
+      post_processing_steps: [{ type: 'json-repair' }],
+    });
+    let response: Response | undefined;
+    for (let attempt = 0; attempt < MAX_GATEWAY_ATTEMPTS; attempt += 1) {
+      response = await queuedGatewayFetch(
+        apiKey,
+        gatewayBody,
+        controller.signal,
+      );
+      if (response.ok || !isRetryableGatewayStatus(response.status)) break;
+      if (attempt < MAX_GATEWAY_ATTEMPTS - 1) {
+        await sleep(RETRY_BASE_DELAY_MS * 2 ** attempt);
+      }
+    }
 
-    if (!response.ok) {
+    if (!response?.ok) {
       return Response.json(
-        { error: 'AssemblyAI could not analyze this transcript turn.' },
-        { status: response.status },
+        {
+          error:
+            'Operational analysis is temporarily delayed. Existing incident memory remains active.',
+        },
+        { status: 503 },
       );
     }
 
@@ -160,28 +201,29 @@ export async function POST(request: Request) {
       );
     }
 
-    const incident: unknown = JSON.parse(content);
-    if (!isIncidentSnapshot(incident)) {
+    const analysis: unknown = normalizeAnalysis(JSON.parse(content));
+    if (!isIncidentAnalysis(analysis)) {
       return Response.json(
         { error: 'The incident analyzer returned an invalid result.' },
         { status: 502 },
       );
     }
 
-    const sanitizedIncident = {
-      ...incident,
-      recommendedActionIds: [
-        ...new Set(
-          incident.recommendedActionIds.filter(
-            (actionId) =>
-              actionId !== 'dispatch_rescue_canoes' ||
-              incident.hazardType === 'flood',
+    return Response.json({
+      incident: {
+        ...analysis.incident,
+        recommendedActionIds: [
+          ...new Set(
+            analysis.incident.recommendedActionIds.filter(
+              (actionId) =>
+                actionId !== 'dispatch_rescue_canoes' ||
+                analysis.incident.hazardType === 'flood',
+            ),
           ),
-        ),
-      ],
-    };
-
-    return Response.json({ incident: sanitizedIncident });
+        ],
+      },
+      reasoningEvents: analysis.reasoningEvents,
+    });
   } catch (error) {
     const message =
       error instanceof Error && error.name === 'AbortError'

@@ -1,0 +1,84 @@
+{
+  "generatedAt": "2026-09-02T17:41:02.556Z",
+  "sampleRate": 16000,
+  "calls": {
+    "flood-call-01": {
+      "file": "flood-call-01.wav",
+      "bytes": 2160684,
+      "durationSeconds": 67.52,
+      "turns": 8
+    },
+    "flood-call-02": {
+      "file": "flood-call-02.wav",
+      "bytes": 2152364,
+      "durationSeconds": 67.26,
+      "turns": 8
+    },
+    "flood-call-03": {
+      "file": "flood-call-03.wav",
+      "bytes": 2393644,
+      "durationSeconds": 74.8,
+      "turns": 9
+    },
+    "flood-call-04": {
+      "file": "flood-call-04.wav",
+      "bytes": 2234924,
+      "durationSeconds": 69.84,
+      "turns": 9
+    },
+    "flood-call-05": {
+      "file": "flood-call-05.wav",
+      "bytes": 2154924,
+      "durationSeconds": 67.34,
+      "turns": 8
+    },
+    "storm-call-01": {
+      "file": "storm-call-01.wav",
+      "bytes": 1953324,
+      "durationSeconds": 61.04,
+      "turns": 8
+    },
+    "storm-call-02": {
+      "file": "storm-call-02.wav",
+      "bytes": 2039724,
+      "durationSeconds": 63.74,
+      "turns": 8
+    },
+    "storm-call-03": {
+      "file": "storm-call-03.wav",
+      "bytes": 1909804,
+      "durationSeconds": 59.68,
+      "turns": 8
+    },
+    "storm-call-04": {
+      "file": "storm-call-04.wav",
+      "bytes": 1863724,
+      "durationSeconds": 58.24,
+      "turns": 8
+    },
+    "landslide-call-01": {
+      "file": "landslide-call-01.wav",
+      "bytes": 2025004,
+      "durationSeconds": 63.28,
+      "turns": 8
+    },
+    "landslide-call-02": {
+      "file": "landslide-call-02.wav",
+      "bytes": 1957804,
+      "durationSeconds": 61.18,
+      "turns": 8
+    },
+    "landslide-call-03": {
+      "file": "landslide-call-03.wav",
+      "bytes": 1888684,
+      "durationSeconds": 59.02,
+      "turns": 8
+    },
+    "landslide-call-04": {
+      "file": "landslide-call-04.wav",
+      "bytes": 1824684,
+      "durationSeconds": 57.02,
+      "turns": 8
+    }
+  }
+}

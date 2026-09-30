@@ -2,7 +2,13 @@
 
 import { useCallback, useEffect, useRef, useState } from 'react';
 
+export type TranscriptTurn = {
+  id: string;
+  text: string;
+};
+
 type StreamState = 'idle' | 'connecting' | 'listening' | 'error';
+export type FixturePlaybackState = 'idle' | 'playing' | 'paused' | 'ended';
 
 type TokenResponse = {
   available: boolean;
@@ -16,36 +22,109 @@ type TurnMessage = {
   end_of_turn?: boolean;
 };
 
+type FixtureOptions = {
+  callId: string;
+  initialTurns?: TranscriptTurn[];
+  startAt?: number;
+};
+
+type FixtureResources = {
+  audio: HTMLAudioElement;
+};
+
+const KEY_TERMS = [
+  'Vinh City',
+  'Ben Thuy Bridge 1',
+  'Vinh Railway Station',
+  'Vinh Market',
+  'Vinh University',
+  'Nui Quyet',
+  'Nghe An General Friendship Hospital',
+  'Vinh International Airport',
+  'Road Team 3',
+  'disaster prevention command',
+];
+
+function streamingSocketUrl(token: string) {
+  const socketUrl = new URL('wss://streaming.assemblyai.com/v3/ws');
+  socketUrl.searchParams.set('token', token);
+  socketUrl.searchParams.set('sample_rate', '16000');
+  socketUrl.searchParams.set('speech_model', 'u3-rt-pro');
+  socketUrl.searchParams.set(
+    'prompt',
+    'Transcribe English emergency calls accurately. Preserve measurements, place names, negation, uncertainty, and whether a fact is reported or confirmed.',
+  );
+  socketUrl.searchParams.set('keyterms_prompt', JSON.stringify(KEY_TERMS));
+  return socketUrl;
+}
+
+function resamplePcm(
+  channel: Float32Array,
+  start: number,
+  end: number,
+  sourceRate: number,
+) {
+  const sourceLength = Math.max(0, end - start);
+  const targetLength = Math.max(
+    1,
+    Math.floor((sourceLength * 16_000) / sourceRate),
+  );
+  const pcm = new Int16Array(targetLength);
+  for (let index = 0; index < targetLength; index += 1) {
+    const sourceIndex = Math.min(
+      channel.length - 1,
+      start + Math.floor((index * sourceLength) / targetLength),
+    );
+    pcm[index] = Math.round(
+      Math.max(-1, Math.min(1, channel[sourceIndex] ?? 0)) * 0x7fff,
+    );
+  }
+  return pcm;
+}
+
 export function useAssemblyAIStream() {
   const [state, setState] = useState<StreamState>('idle');
   const [partialTranscript, setPartialTranscript] = useState('');
   const [finalTranscript, setFinalTranscript] = useState('');
   const [finalTurns, setFinalTurns] = useState<string[]>([]);
+  const [transcriptTurns, setTranscriptTurns] = useState<TranscriptTurn[]>([]);
   const [error, setError] = useState('');
+  const [activeCallId, setActiveCallId] = useState<string | null>(null);
+  const [playbackState, setPlaybackState] =
+    useState<FixturePlaybackState>('idle');
+  const [currentTime, setCurrentTime] = useState(0);
+  const [duration, setDuration] = useState(0);
   const cleanupRef = useRef<(() => void) | null>(null);
+  const fixtureRef = useRef<FixtureResources | null>(null);
+
+  const cleanup = useCallback(() => {
+    cleanupRef.current?.();
+    cleanupRef.current = null;
+    fixtureRef.current = null;
+  }, []);
 
   const stop = useCallback(() => {
-    cleanupRef.current?.();
-    cleanupRef.current = null;
+    cleanup();
     setState('idle');
-  }, []);
+    setPlaybackState('idle');
+  }, [cleanup]);
 
   const reset = useCallback(() => {
-    cleanupRef.current?.();
-    cleanupRef.current = null;
+    cleanup();
     setState('idle');
     setPartialTranscript('');
     setFinalTranscript('');
     setFinalTurns([]);
+    setTranscriptTurns([]);
     setError('');
-  }, []);
+    setActiveCallId(null);
+    setPlaybackState('idle');
+    setCurrentTime(0);
+    setDuration(0);
+  }, [cleanup]);
 
   const start = useCallback(async () => {
-    stop();
-    setError('');
-    setPartialTranscript('');
-    setFinalTranscript('');
-    setFinalTurns([]);
+    reset();
     setState('connecting');
 
     try {
@@ -59,12 +138,12 @@ export function useAssemblyAIStream() {
         );
       }
 
-      const stream = await navigator.mediaDevices.getUserMedia({
+      const mediaStream = await navigator.mediaDevices.getUserMedia({
         audio: { echoCancellation: true, noiseSuppression: true },
       });
       const audioContext = new AudioContext();
       await audioContext.audioWorklet.addModule('/pcm-processor.js');
-      const source = audioContext.createMediaStreamSource(stream);
+      const source = audioContext.createMediaStreamSource(mediaStream);
       const worklet = new AudioWorkletNode(audioContext, 'flood-signal-pcm');
       const silentGain = audioContext.createGain();
       silentGain.gain.value = 0;
@@ -72,29 +151,9 @@ export function useAssemblyAIStream() {
       worklet.connect(silentGain);
       silentGain.connect(audioContext.destination);
 
-      const socketUrl = new URL('wss://streaming.assemblyai.com/v3/ws');
-      socketUrl.searchParams.set('token', tokenBody.token);
-      socketUrl.searchParams.set('sample_rate', '16000');
-      socketUrl.searchParams.set('speech_model', 'u3-rt-pro');
-      socketUrl.searchParams.set(
-        'prompt',
-        'Transcribe English emergency operations audio accurately. Preserve measurements, times, negation, uncertainty, and whether information is reported or confirmed.',
-      );
-      socketUrl.searchParams.set(
-        'keyterms_prompt',
-        JSON.stringify([
-          'Vinh City',
-          'Ben Thuy Bridge 1',
-          'Vinh Railway Station',
-          'Vinh Market',
-          'Vinh University',
-          'Nui Quyet',
-          'Road Team 3',
-          'disaster prevention command',
-        ]),
-      );
-      const socket = new WebSocket(socketUrl);
+      const socket = new WebSocket(streamingSocketUrl(tokenBody.token));
       let socketReady = false;
+      let turnIndex = 0;
 
       worklet.port.onmessage = (event: MessageEvent<ArrayBuffer>) => {
         if (socketReady && socket.readyState === WebSocket.OPEN) {
@@ -106,22 +165,23 @@ export function useAssemblyAIStream() {
         socketReady = true;
         setState('listening');
       });
-
       socket.addEventListener('message', (event) => {
         const message = JSON.parse(String(event.data)) as TurnMessage;
         if (message.type !== 'Turn' || !message.transcript) return;
         setPartialTranscript(message.transcript);
-        if (message.end_of_turn) {
-          setFinalTurns((current) => [...current, message.transcript ?? '']);
-          setFinalTranscript((current) =>
-            current
-              ? `${current} ${message.transcript}`
-              : (message.transcript ?? current),
-          );
-          setPartialTranscript('');
-        }
+        if (!message.end_of_turn) return;
+        const text = message.transcript.trim();
+        setTranscriptTurns((current) => [
+          ...current,
+          { id: `microphone-${turnIndex}`, text },
+        ]);
+        turnIndex += 1;
+        setFinalTurns((current) => [...current, text]);
+        setFinalTranscript((current) =>
+          current ? `${current} ${text}` : text,
+        );
+        setPartialTranscript('');
       });
-
       socket.addEventListener('error', () => {
         setError('The streaming connection was interrupted.');
         setState('error');
@@ -135,135 +195,227 @@ export function useAssemblyAIStream() {
         worklet.disconnect();
         source.disconnect();
         silentGain.disconnect();
-        for (const track of stream.getTracks()) track.stop();
+        for (const track of mediaStream.getTracks()) track.stop();
         void audioContext.close();
       };
     } catch (caughtError) {
-      const message =
+      setError(
         caughtError instanceof Error
           ? caughtError.message
-          : 'Live transcription could not start.';
-      setError(message);
+          : 'Live transcription could not start.',
+      );
       setState('error');
     }
-  }, [stop]);
+  }, [reset]);
 
-  const startFixture = useCallback(async (audioUrl: string) => {
-    stop();
-    setError('');
-    setPartialTranscript('');
-    setFinalTranscript('');
-    setFinalTurns([]);
-    setState('connecting');
+  const startFixture = useCallback(
+    async (audioUrl: string, options: FixtureOptions) => {
+      reset();
+      const initialTurns = options.initialTurns ?? [];
+      const initialTranscript = initialTurns.map((turn) => turn.text).join(' ');
+      setActiveCallId(options.callId);
+      setTranscriptTurns(initialTurns);
+      setFinalTurns(initialTurns.map((turn) => turn.text));
+      setFinalTranscript(initialTranscript);
+      setState('connecting');
 
-    try {
-      const tokenResponse = await fetch('/api/assemblyai-token', { cache: 'no-store' });
-      const tokenBody = (await tokenResponse.json()) as TokenResponse;
-      if (!tokenResponse.ok || !tokenBody.token) {
-        throw new Error(tokenBody.error ?? 'Live transcription is unavailable.');
-      }
-
-      const audioContext = new AudioContext();
-      const audioData = await fetch(audioUrl).then((response) => {
-        if (!response.ok) throw new Error('Audio fixture could not be loaded.');
-        return response.arrayBuffer();
-      });
-      const audioBuffer = await audioContext.decodeAudioData(audioData);
-      const channel = audioBuffer.getChannelData(0);
-      const socketUrl = new URL('wss://streaming.assemblyai.com/v3/ws');
-      socketUrl.searchParams.set('token', tokenBody.token);
-      socketUrl.searchParams.set('sample_rate', '16000');
-      socketUrl.searchParams.set('speech_model', 'u3-rt-pro');
-      socketUrl.searchParams.set('prompt', 'Transcribe English emergency operations audio accurately. Preserve measurements, times, negation, uncertainty, and whether information is reported or confirmed.');
-      socketUrl.searchParams.set('keyterms_prompt', JSON.stringify(['Vinh City', 'Ben Thuy Bridge 1', 'Vinh Railway Station', 'Vinh Market', 'Vinh University', 'Nui Quyet', 'Road Team 3', 'disaster prevention command']));
-      const socket = new WebSocket(socketUrl);
-      let socketReady = false;
-      let offset = 0;
-      let sendTimer: number | null = null;
-      let finishTimer: number | null = null;
-
-      const sendChunk = () => {
-        if (!socketReady || socket.readyState !== WebSocket.OPEN) return;
-        const sourceRate = audioBuffer.sampleRate;
-        const sourceChunkSize = Math.max(1, Math.floor(sourceRate / 10));
-        const end = Math.min(channel.length, offset + sourceChunkSize);
-        const targetLength = Math.max(1, Math.floor(((end - offset) * 16000) / sourceRate));
-        const pcm = new Int16Array(targetLength);
-        for (let index = 0; index < targetLength; index += 1) {
-          const sourceIndex = Math.min(channel.length - 1, offset + Math.floor((index * (end - offset)) / targetLength));
-          pcm[index] = Math.max(-1, Math.min(1, channel[sourceIndex])) * 0x7fff;
+      try {
+        const [tokenResponse, audioData] = await Promise.all([
+          fetch('/api/assemblyai-token', { cache: 'no-store' }),
+          fetch(audioUrl).then((response) => {
+            if (!response.ok) {
+              throw new Error('Synthetic call audio could not be loaded.');
+            }
+            return response.arrayBuffer();
+          }),
+        ]);
+        const tokenBody = (await tokenResponse.json()) as TokenResponse;
+        if (!tokenResponse.ok || !tokenBody.token) {
+          throw new Error(
+            tokenBody.error ?? 'Live transcription is unavailable.',
+          );
         }
-        socket.send(pcm.buffer);
-        offset = end;
-        if (offset >= channel.length) {
-          if (sendTimer) window.clearInterval(sendTimer);
-          sendTimer = null;
+
+        const audioContext = new AudioContext();
+        const audioBuffer = await audioContext.decodeAudioData(
+          audioData.slice(0),
+        );
+        const channel = audioBuffer.getChannelData(0);
+        const audio = new Audio(audioUrl);
+        audio.preload = 'auto';
+        const socket = new WebSocket(streamingSocketUrl(tokenBody.token));
+        let socketReady = false;
+        const startAt = Math.min(
+          Math.max(options.startAt ?? 0, 0),
+          Math.max(0, audioBuffer.duration - 0.05),
+        );
+        let offset = Math.floor(startAt * audioBuffer.sampleRate);
+        let turnIndex = initialTurns.length;
+        let sendTimer: number | null = null;
+        let finishTimer: number | null = null;
+        let shuttingDown = false;
+
+        setDuration(audioBuffer.duration);
+        setCurrentTime(startAt);
+        audio.currentTime = startAt;
+
+        const sendThroughPlaybackPosition = () => {
+          if (!socketReady || socket.readyState !== WebSocket.OPEN) return;
+          setCurrentTime(audio.currentTime);
+          const desiredOffset = Math.min(
+            channel.length,
+            Math.floor(audio.currentTime * audioBuffer.sampleRate),
+          );
+          if (desiredOffset <= offset) return;
+          socket.send(
+            resamplePcm(channel, offset, desiredOffset, audioBuffer.sampleRate)
+              .buffer,
+          );
+          offset = desiredOffset;
+        };
+
+        const terminateAfterFinalAudio = () => {
+          if (shuttingDown) return;
+          shuttingDown = true;
+          if (channel.length > offset && socket.readyState === WebSocket.OPEN) {
+            socket.send(
+              resamplePcm(
+                channel,
+                offset,
+                channel.length,
+                audioBuffer.sampleRate,
+              ).buffer,
+            );
+            offset = channel.length;
+          }
           finishTimer = window.setTimeout(() => {
-            if (socket.readyState === WebSocket.OPEN) socket.send(JSON.stringify({ type: 'Terminate' }));
-          }, 1200);
-        }
-      };
+            if (socket.readyState === WebSocket.OPEN) {
+              socket.send(JSON.stringify({ type: 'Terminate' }));
+            }
+          }, 1_400);
+        };
 
-      socket.addEventListener('open', () => {
-        socketReady = true;
-        setState('listening');
-        sendChunk();
-        sendTimer = window.setInterval(sendChunk, 100);
-      });
-      socket.addEventListener('message', (event) => {
-        const message = JSON.parse(String(event.data)) as TurnMessage;
-        if (message.type !== 'Turn' || !message.transcript) return;
-        setPartialTranscript(message.transcript);
-        if (message.end_of_turn) {
-          setFinalTurns((current) => [...current, message.transcript ?? '']);
-          setFinalTranscript((current) => current ? `${current} ${message.transcript}` : (message.transcript ?? current));
+        const onPlay = () => {
+          setPlaybackState('playing');
+          setState('listening');
+        };
+        const onPause = () => {
+          if (!audio.ended && !shuttingDown) setPlaybackState('paused');
+        };
+        const onEnded = () => {
+          setCurrentTime(audio.duration || audioBuffer.duration);
+          setPlaybackState('ended');
+          terminateAfterFinalAudio();
+        };
+
+        audio.addEventListener('play', onPlay);
+        audio.addEventListener('pause', onPause);
+        audio.addEventListener('ended', onEnded);
+
+        socket.addEventListener('open', () => {
+          socketReady = true;
+          setState('listening');
+          sendTimer = window.setInterval(sendThroughPlaybackPosition, 80);
+          void audio.play().catch(() => {
+            setPlaybackState('paused');
+            setError(
+              'Audio is ready. Press play once more to begin this call.',
+            );
+          });
+        });
+        socket.addEventListener('message', (event) => {
+          const message = JSON.parse(String(event.data)) as TurnMessage;
+          if (message.type !== 'Turn' || !message.transcript) return;
+          setPartialTranscript(message.transcript);
+          if (!message.end_of_turn) return;
+          const text = message.transcript.trim();
+          setTranscriptTurns((current) => [
+            ...current,
+            { id: `${options.callId}-${turnIndex}`, text },
+          ]);
+          setFinalTurns((current) => [...current, text]);
+          setFinalTranscript((current) =>
+            current ? `${current} ${text}` : text,
+          );
+          turnIndex += 1;
           setPartialTranscript('');
-        }
-      });
-      socket.addEventListener('error', () => {
-        setError('The fixture streaming connection was interrupted.');
+        });
+        socket.addEventListener('error', () => {
+          setError('AssemblyAI lost the synthetic call stream.');
+          setState('error');
+        });
+        socket.addEventListener('close', () => {
+          setState((current) => (current === 'error' ? current : 'idle'));
+        });
+
+        fixtureRef.current = { audio };
+        cleanupRef.current = () => {
+          shuttingDown = true;
+          if (sendTimer) window.clearInterval(sendTimer);
+          if (finishTimer) window.clearTimeout(finishTimer);
+          audio.removeEventListener('play', onPlay);
+          audio.removeEventListener('pause', onPause);
+          audio.removeEventListener('ended', onEnded);
+          audio.pause();
+          audio.removeAttribute('src');
+          audio.load();
+          if (socket.readyState === WebSocket.OPEN) {
+            socket.send(JSON.stringify({ type: 'Terminate' }));
+          }
+          socket.close();
+          void audioContext.close();
+        };
+      } catch (caughtError) {
+        setError(
+          caughtError instanceof Error
+            ? caughtError.message
+            : 'The synthetic call could not be transcribed.',
+        );
         setState('error');
-      });
-      socket.addEventListener('close', () => {
-        setState((current) => current === 'error' ? current : 'idle');
-      });
+        setPlaybackState('idle');
+      }
+    },
+    [reset],
+  );
 
-      const source = audioContext.createBufferSource();
-      source.buffer = audioBuffer;
-      const gain = audioContext.createGain();
-      gain.gain.value = 0.9;
-      source.connect(gain);
-      gain.connect(audioContext.destination);
-      source.start();
+  const pauseFixture = useCallback(() => {
+    fixtureRef.current?.audio.pause();
+  }, []);
 
-      cleanupRef.current = () => {
-        if (sendTimer) window.clearInterval(sendTimer);
-        if (finishTimer) window.clearTimeout(finishTimer);
-        if (socket.readyState === WebSocket.OPEN) socket.send(JSON.stringify({ type: 'Terminate' }));
-        socket.close();
-        source.stop();
-        source.disconnect();
-        gain.disconnect();
-        void audioContext.close();
-      };
-    } catch (caughtError) {
-      const message = caughtError instanceof Error ? caughtError.message : 'Audio fixture could not start.';
-      setError(message);
-      setState('error');
+  const resumeFixture = useCallback(async () => {
+    const audio = fixtureRef.current?.audio;
+    if (!audio) return;
+    setError('');
+    await audio.play();
+  }, []);
+
+  const toggleFixture = useCallback(async () => {
+    if (playbackState === 'playing') {
+      pauseFixture();
+      return;
     }
-  }, [stop]);
+    await resumeFixture();
+  }, [pauseFixture, playbackState, resumeFixture]);
 
-  useEffect(() => stop, [stop]);
+  useEffect(() => cleanup, [cleanup]);
 
   return {
     state,
+    error,
     partialTranscript,
     finalTranscript,
     finalTurns,
-    error,
+    transcriptTurns,
+    activeCallId,
+    playbackState,
+    currentTime,
+    duration,
     start,
+    startFixture,
+    pauseFixture,
+    resumeFixture,
+    toggleFixture,
     stop,
     reset,
-    startFixture,
   };
 }

@@ -6,11 +6,21 @@
     "node": ">=22.13.0"
   },
   "scripts": {
+    "predev": "npm run prepare:map-worker",
     "dev": "vinext dev",
+    "prebuild": "npm run prepare:map-worker",
     "build": "vinext build",
     "start": "wrangler dev --config dist/server/wrangler.json",
+    "prestart:local": "npm run build",
     "start:local": "wrangler dev --config dist/server/wrangler.json --env-file=${INIT_CWD}/.env",
-    "lint": "oxlint app components/flood-dashboard.tsx components/response-actions.tsx components/vinh-map.tsx hooks/use-assemblyai-stream.ts lib/incidents.ts lib/server-env.ts public/pcm-processor.js",
+    "check:live-calls": "node scripts/check-live-call-ui.mjs",
+    "check:discovery-ui": "node scripts/check-discovery-ui.mjs",
+    "check:dynamic-geocoding": "node scripts/check-dynamic-geocoding.mjs",
+    "check:operational-analysis": "node scripts/check-operational-analysis.mjs",
+    "check:gradium-assets": "node scripts/check-gradium-assets.mjs",
+    "generate:gradium-audio": "node --env-file=.env scripts/generate-scenario-audio.mjs",
+    "prepare:map-worker": "node scripts/prepare-maplibre-worker.mjs",
+    "lint": "oxlint app components/flood-dashboard.tsx components/response-actions.tsx components/vinh-map.tsx hooks/use-assemblyai-stream.ts hooks/use-gradium-tts.ts lib/gradium.ts lib/incidents.ts lib/server-env.ts public/pcm-processor.js",
     "format": "oxfmt"
   },
   "dependencies": {

@@ -52,15 +52,10 @@ export function ResponseActions({
       <div className="flex items-center gap-2">
         <Send className="size-4 text-[#e3836e]" aria-hidden="true" />
         <h3 className="text-xs font-semibold">Recommended follow-up actions</h3>
-        <Badge className="ml-auto border-[#e3836e]/20 bg-[#e3836e]/8 font-mono text-[8px] text-[#df927f]">
+        <Badge className="ml-auto border-[#e3836e]/20 bg-[#e3836e]/8 text-[8px] text-[#df927f]">
           HUMAN AUTHORIZATION
         </Badge>
       </div>
-      <p className="mt-2 text-[10px] leading-relaxed text-[#778884]">
-        AI proposes actions from the incident record. Nothing is contacted or
-        dispatched until an operator confirms it.
-      </p>
-
       <div className="mt-3 space-y-2">
         {incident.recommendedActionIds.map((actionId) => {
           const action = actionCatalog[actionId];

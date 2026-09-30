@@ -1,33 +1,28 @@
 import type { Metadata } from 'next';
-import { Geist, Geist_Mono } from 'next/font/google';
+import { DM_Sans } from 'next/font/google';
 import './globals.css';
 
-const geistSans = Geist({
-  variable: '--font-geist-sans',
-  subsets: ['latin'],
-});
-
-const geistMono = Geist_Mono({
-  variable: '--font-geist-mono',
+const dmSans = DM_Sans({
+  variable: '--font-dm-sans',
   subsets: ['latin'],
 });
 
 export const metadata: Metadata = {
-  title: 'FloodSignal | Vinh City Exercise',
+  title: 'CrisisSignal | Crisis Coordination',
   description:
-    'A voice-to-map flood operations simulation for Vinh City, Vietnam.',
+    'An AI-assisted multi-hazard crisis coordination simulation for Vinh City, Vietnam.',
   openGraph: {
-    title: 'FloodSignal | Vinh City Exercise',
+    title: 'CrisisSignal | Crisis Coordination',
     description:
-      'A voice-to-map flood operations simulation for Vinh City, Vietnam.',
-    images: ['/floodsignal-social-preview.png'],
+      'An AI-assisted multi-hazard crisis coordination simulation for Vinh City, Vietnam.',
+    images: ['/og.png'],
   },
   twitter: {
     card: 'summary_large_image',
-    title: 'FloodSignal | Vinh City Exercise',
+    title: 'CrisisSignal | Crisis Coordination',
     description:
-      'A voice-to-map flood operations simulation for Vinh City, Vietnam.',
-    images: ['/floodsignal-social-preview.png'],
+      'An AI-assisted multi-hazard crisis coordination simulation for Vinh City, Vietnam.',
+    images: ['/og.png'],
   },
 };
 
@@ -38,11 +33,7 @@ export default function RootLayout({
 }>) {
   return (
     <html lang="en" className="dark">
-      <body
-        className={`${geistSans.variable} ${geistMono.variable} antialiased`}
-      >
-        {children}
-      </body>
+      <body className={`${dmSans.variable} antialiased`}>{children}</body>
     </html>
   );
 }
